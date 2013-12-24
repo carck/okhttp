@@ -70,8 +70,7 @@ import static com.squareup.okhttp.mockwebserver.SocketPolicy.FAIL_HANDSHAKE;
  */
 public final class MockWebServer {
   private static final byte[] NPN_PROTOCOLS = {
-      // TODO: support HTTP/2.0.
-      // 17, 'H', 'T', 'T', 'P', '-', 'd', 'r', 'a', 'f', 't', '-', '0', '6', '/', '2', '.', '0',
+      17, 'H', 'T', 'T', 'P', '-', 'd', 'r', 'a', 'f', 't', '-', '0', '6', '/', '2', '.', '0',
       6, 's', 'p', 'd', 'y', '/', '3',
       8, 'h', 't', 't', 'p', '/', '1', '.', '1'
   };
@@ -505,7 +504,9 @@ public final class MockWebServer {
       if (hasBody) {
         throw new IllegalArgumentException("Request must not have a body: " + request);
       }
-    } else if (!request.startsWith("POST ") && !request.startsWith("PUT ")) {
+    } else if (!request.startsWith("POST ")
+        && !request.startsWith("PUT ")
+        && !request.startsWith("PATCH ")) {
       throw new UnsupportedOperationException("Unexpected method: " + request);
     }
 
