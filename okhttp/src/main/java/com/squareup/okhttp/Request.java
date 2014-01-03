@@ -15,8 +15,11 @@
  */
 package com.squareup.okhttp;
 
+import com.squareup.okhttp.internal.Platform;
 import com.squareup.okhttp.internal.Util;
-import com.squareup.okhttp.internal.http.RawHeaders;
+import com.squareup.okhttp.internal.http.HeaderParser;
+import com.squareup.okhttp.internal.http.Headers;
+import com.squareup.okhttp.internal.http.HttpDate;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -24,8 +27,12 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URL;
+import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -35,23 +42,35 @@ import java.util.Set;
  * <h3>Warning: Experimental OkHttp 2.0 API</h3>
  * This class is in beta. APIs are subject to change!
  */
-/* OkHttp 2.0: public */ final class Request {
+public final class Request {
   private final URL url;
   private final String method;
-  private final RawHeaders headers;
+  private final Headers headers;
   private final Body body;
   private final Object tag;
+
+  private volatile ParsedHeaders parsedHeaders; // Lazily initialized.
+  private volatile URI uri; // Lazily initialized.
 
   private Request(Builder builder) {
     this.url = builder.url;
     this.method = builder.method;
-    this.headers = new RawHeaders(builder.headers);
+    this.headers = builder.headers.build();
     this.body = builder.body;
     this.tag = builder.tag != null ? builder.tag : this;
   }
 
   public URL url() {
     return url;
+  }
+
+  public URI uri() throws IOException {
+    try {
+      URI result = uri;
+      return result != null ? result : (uri = Platform.get().toUriLenient(url));
+    } catch (URISyntaxException e) {
+      throw new IOException(e.getMessage());
+    }
   }
 
   public String urlString() {
@@ -74,16 +93,20 @@ import java.util.Set;
     return headers.names();
   }
 
+  Headers headers() {
+    return headers;
+  }
+
   public int headerCount() {
-    return headers.length();
+    return headers.size();
   }
 
   public String headerName(int index) {
-    return headers.getFieldName(index);
+    return headers.name(index);
   }
 
   public String headerValue(int index) {
-    return headers.getValue(index);
+    return headers.value(index);
   }
 
   public Body body() {
@@ -94,16 +117,133 @@ import java.util.Set;
     return tag;
   }
 
-  public abstract static class Body {
-    /**
-     * Returns the Content-Type header for this body, or null if the content
-     * type is unknown.
-     */
-    public MediaType contentType() {
-      return null;
-    }
+  public Builder newBuilder() {
+    return new Builder(this);
+  }
 
-    /** Returns the number of bytes in this body, or -1 if that count is unknown. */
+  public Headers getHeaders() {
+    return headers;
+  }
+
+  public boolean getNoCache() {
+    return parsedHeaders().noCache;
+  }
+
+  public int getMaxAgeSeconds() {
+    return parsedHeaders().maxAgeSeconds;
+  }
+
+  public int getMaxStaleSeconds() {
+    return parsedHeaders().maxStaleSeconds;
+  }
+
+  public int getMinFreshSeconds() {
+    return parsedHeaders().minFreshSeconds;
+  }
+
+  public boolean getOnlyIfCached() {
+    return parsedHeaders().onlyIfCached;
+  }
+
+  // TODO: Make non-public. This conflicts with the Body's content length!
+  public long getContentLength() {
+    return parsedHeaders().contentLength;
+  }
+
+  public String getUserAgent() {
+    return parsedHeaders().userAgent;
+  }
+
+  // TODO: Make non-public. This conflicts with the Body's content type!
+  public String getContentType() {
+    return parsedHeaders().contentType;
+  }
+
+  public String getProxyAuthorization() {
+    return parsedHeaders().proxyAuthorization;
+  }
+
+  private ParsedHeaders parsedHeaders() {
+    ParsedHeaders result = parsedHeaders;
+    return result != null ? result : (parsedHeaders = new ParsedHeaders(headers));
+  }
+
+  public boolean isHttps() {
+    return url().getProtocol().equals("https");
+  }
+
+  /** Parsed request headers, computed on-demand and cached. */
+  private static class ParsedHeaders {
+    /** Don't use a cache to satisfy this request. */
+    private boolean noCache;
+    private int maxAgeSeconds = -1;
+    private int maxStaleSeconds = -1;
+    private int minFreshSeconds = -1;
+
+    /**
+     * This field's name "only-if-cached" is misleading. It actually means "do
+     * not use the network". It is set by a client who only wants to make a
+     * request if it can be fully satisfied by the cache. Cached responses that
+     * would require validation (ie. conditional gets) are not permitted if this
+     * header is set.
+     */
+    private boolean onlyIfCached;
+
+    private long contentLength = -1;
+    private String userAgent;
+    private String contentType;
+    private String proxyAuthorization;
+
+    public ParsedHeaders(Headers headers) {
+      HeaderParser.CacheControlHandler handler = new HeaderParser.CacheControlHandler() {
+        @Override public void handle(String directive, String parameter) {
+          if ("no-cache".equalsIgnoreCase(directive)) {
+            noCache = true;
+          } else if ("max-age".equalsIgnoreCase(directive)) {
+            maxAgeSeconds = HeaderParser.parseSeconds(parameter);
+          } else if ("max-stale".equalsIgnoreCase(directive)) {
+            maxStaleSeconds = HeaderParser.parseSeconds(parameter);
+          } else if ("min-fresh".equalsIgnoreCase(directive)) {
+            minFreshSeconds = HeaderParser.parseSeconds(parameter);
+          } else if ("only-if-cached".equalsIgnoreCase(directive)) {
+            onlyIfCached = true;
+          }
+        }
+      };
+
+      for (int i = 0; i < headers.size(); i++) {
+        String fieldName = headers.name(i);
+        String value = headers.value(i);
+        if ("Cache-Control".equalsIgnoreCase(fieldName)) {
+          HeaderParser.parseCacheControl(value, handler);
+        } else if ("Pragma".equalsIgnoreCase(fieldName)) {
+          if ("no-cache".equalsIgnoreCase(value)) {
+            noCache = true;
+          }
+        } else if ("Content-Length".equalsIgnoreCase(fieldName)) {
+          try {
+            contentLength = Long.parseLong(value);
+          } catch (NumberFormatException ignored) {
+          }
+        } else if ("User-Agent".equalsIgnoreCase(fieldName)) {
+          userAgent = value;
+        } else if ("Content-Type".equalsIgnoreCase(fieldName)) {
+          contentType = value;
+        } else if ("Proxy-Authorization".equalsIgnoreCase(fieldName)) {
+          proxyAuthorization = value;
+        }
+      }
+    }
+  }
+
+  public abstract static class Body {
+    /** Returns the Content-Type header for this body. */
+    public abstract MediaType contentType();
+
+    /**
+     * Returns the number of bytes that will be written to {@code out} in a call
+     * to {@link #writeTo}, or -1 if that count is unknown.
+     */
     public long contentLength() {
       return -1;
     }
@@ -182,30 +322,34 @@ import java.util.Set;
 
   public static class Builder {
     private URL url;
-    private String method = "GET";
-    private final RawHeaders headers = new RawHeaders();
+    private String method;
+    private final Headers.Builder headers;
     private Body body;
     private Object tag;
 
-    public Builder(String url) {
-      url(url);
+    public Builder() {
+      this.method = "GET";
+      this.headers = new Headers.Builder();
     }
 
-    public Builder(URL url) {
-      url(url);
+    private Builder(Request request) {
+      this.url = request.url;
+      this.method = request.method;
+      this.body = request.body;
+      this.tag = request.tag;
+      this.headers = request.headers.newBuilder();
     }
 
     public Builder url(String url) {
       try {
-        this.url = new URL(url);
-        return this;
+        return url(new URL(url));
       } catch (MalformedURLException e) {
         throw new IllegalArgumentException("Malformed URL: " + url);
       }
     }
 
     public Builder url(URL url) {
-      if (url == null) throw new IllegalStateException("url == null");
+      if (url == null) throw new IllegalArgumentException("url == null");
       this.url = url;
       return this;
     }
@@ -226,6 +370,58 @@ import java.util.Set;
     public Builder addHeader(String name, String value) {
       headers.add(name, value);
       return this;
+    }
+
+    public Builder removeHeader(String name) {
+      headers.removeAll(name);
+      return this;
+    }
+
+    // TODO: conflict's with the body's content type.
+    public Builder setContentLength(long contentLength) {
+      headers.set("Content-Length", Long.toString(contentLength));
+      return this;
+    }
+
+    public void setUserAgent(String userAgent) {
+      headers.set("User-Agent", userAgent);
+    }
+
+    // TODO: conflict's with the body's content type.
+    public void setContentType(String contentType) {
+      headers.set("Content-Type", contentType);
+    }
+
+    public void setIfModifiedSince(Date date) {
+      headers.set("If-Modified-Since", HttpDate.format(date));
+    }
+
+    public void setIfNoneMatch(String ifNoneMatch) {
+      headers.set("If-None-Match", ifNoneMatch);
+    }
+
+    public void addCookies(Map<String, List<String>> cookieHeaders) {
+      for (Map.Entry<String, List<String>> entry : cookieHeaders.entrySet()) {
+        String key = entry.getKey();
+        if (("Cookie".equalsIgnoreCase(key) || "Cookie2".equalsIgnoreCase(key))
+            && !entry.getValue().isEmpty()) {
+          headers.add(key, buildCookieHeader(entry.getValue()));
+        }
+      }
+    }
+
+    /**
+     * Send all cookies in one big header, as recommended by
+     * <a href="http://tools.ietf.org/html/rfc6265#section-4.2.1">RFC 6265</a>.
+     */
+    private String buildCookieHeader(List<String> cookies) {
+      if (cookies.size() == 1) return cookies.get(0);
+      StringBuilder sb = new StringBuilder();
+      for (int i = 0; i < cookies.size(); i++) {
+        if (i > 0) sb.append("; ");
+        sb.append(cookies.get(i));
+      }
+      return sb.toString();
     }
 
     public Builder get() {
@@ -264,6 +460,7 @@ import java.util.Set;
     }
 
     public Request build() {
+      if (url == null) throw new IllegalStateException("url == null");
       return new Request(this);
     }
   }
