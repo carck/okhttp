@@ -17,6 +17,7 @@
 
 package com.squareup.okhttp.mockwebserver;
 
+import com.squareup.okhttp.internal.ByteString;
 import com.squareup.okhttp.internal.Platform;
 import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.spdy.IncomingStreamHandler;
@@ -69,20 +70,29 @@ import static com.squareup.okhttp.mockwebserver.SocketPolicy.FAIL_HANDSHAKE;
  * replays them upon request in sequence.
  */
 public final class MockWebServer {
-  private static final byte[] NPN_PROTOCOLS = {
-      17, 'H', 'T', 'T', 'P', '-', 'd', 'r', 'a', 'f', 't', '-', '0', '6', '/', '2', '.', '0',
-      6, 's', 'p', 'd', 'y', '/', '3',
-      8, 'h', 't', 't', 'p', '/', '1', '.', '1'
+  private static final byte[] HTTP_20_DRAFT_09 = new byte[] {
+      'H', 'T', 'T', 'P', '-', 'd', 'r', 'a', 'f', 't', '-', '0', '9', '/', '2', '.', '0'
   };
   private static final byte[] SPDY3 = new byte[] {
       's', 'p', 'd', 'y', '/', '3'
   };
-  private static final byte[] HTTP_20_DRAFT_06 = new byte[] {
-      'H', 'T', 'T', 'P', '-', 'd', 'r', 'a', 'f', 't', '-', '0', '6', '/', '2', '.', '0'
-  };
   private static final byte[] HTTP_11 = new byte[] {
       'h', 't', 't', 'p', '/', '1', '.', '1'
   };
+  private static final byte[] NPN_PROTOCOLS = joinNpnProtocols(HTTP_20_DRAFT_09, SPDY3, HTTP_11);
+
+  private static byte[] joinNpnProtocols(byte[]... protocols) {
+    try {
+      ByteArrayOutputStream baos = new ByteArrayOutputStream();
+      for (byte[] protocol : protocols) {
+        baos.write(protocol.length);
+        baos.write(protocol);
+      }
+      return baos.toByteArray();
+    } catch (IOException e) {
+      throw new AssertionError(e);
+    }
+  }
 
   private static final X509TrustManager UNTRUSTED_TRUST_MANAGER = new X509TrustManager() {
     @Override public void checkClientTrusted(X509Certificate[] chain, String authType)
@@ -326,8 +336,8 @@ public final class MockWebServer {
             byte[] selectedProtocol = Platform.get().getNpnSelectedProtocol(sslSocket);
             if (selectedProtocol == null || Arrays.equals(selectedProtocol, HTTP_11)) {
               transport = Transport.HTTP_11;
-            } else if (Arrays.equals(selectedProtocol, HTTP_20_DRAFT_06)) {
-              transport = Transport.HTTP_20_DRAFT_06;
+            } else if (Arrays.equals(selectedProtocol, HTTP_20_DRAFT_09)) {
+              transport = Transport.HTTP_20_DRAFT_09;
             } else if (Arrays.equals(selectedProtocol, SPDY3)) {
               transport = Transport.SPDY_3;
             } else {
@@ -340,14 +350,14 @@ public final class MockWebServer {
           socket = raw;
         }
 
-        if (transport == Transport.SPDY_3 || transport == Transport.HTTP_20_DRAFT_06) {
+        if (transport == Transport.HTTP_20_DRAFT_09 || transport == Transport.SPDY_3) {
           SpdySocketHandler spdySocketHandler = new SpdySocketHandler(socket, transport);
           SpdyConnection.Builder builder = new SpdyConnection.Builder(false, socket)
               .handler(spdySocketHandler);
-          if (transport == Transport.SPDY_3) {
-            builder.spdy3();
+          if (transport == Transport.HTTP_20_DRAFT_09) {
+            builder.http20Draft09();
           } else {
-            builder.http20Draft06();
+            builder.spdy3();
           }
           SpdyConnection spdyConnection = builder.build();
           openSpdyConnections.put(spdyConnection, Boolean.TRUE);
@@ -516,7 +526,9 @@ public final class MockWebServer {
 
   private void writeResponse(OutputStream out, MockResponse response) throws IOException {
     out.write((response.getStatus() + "\r\n").getBytes(Util.US_ASCII));
-    for (String header : response.getHeaders()) {
+    List<String> headers = response.getHeaders();
+    for (int i = 0, size = headers.size(); i < size; i++) {
+      String header = headers.get(i);
       out.write((header + "\r\n").getBytes(Util.US_ASCII));
     }
     out.write(("\r\n").getBytes(Util.US_ASCII));
@@ -656,14 +668,14 @@ public final class MockWebServer {
     }
 
     private RecordedRequest readRequest(SpdyStream stream) throws IOException {
-      List<String> spdyHeaders = stream.getRequestHeaders();
+      List<ByteString> spdyHeaders = stream.getRequestHeaders();
       List<String> httpHeaders = new ArrayList<String>();
       String method = "<:method omitted>";
       String path = "<:path omitted>";
       String version = "<:version omitted>";
-      for (Iterator<String> i = spdyHeaders.iterator(); i.hasNext(); ) {
-        String name = i.next();
-        String value = i.next();
+      for (int i = 0, size = spdyHeaders.size(); i < size; i += 2) {
+        String name = spdyHeaders.get(i).utf8();
+        String value = spdyHeaders.get(i + 1).utf8();
         if (":method".equals(name)) {
           method = value;
         } else if (":path".equals(name)) {
@@ -690,23 +702,29 @@ public final class MockWebServer {
     }
 
     private void writeResponse(SpdyStream stream, MockResponse response) throws IOException {
-      List<String> spdyHeaders = new ArrayList<String>();
+      if (response.getSocketPolicy() == SocketPolicy.NO_RESPONSE) {
+        return;
+      }
+      List<ByteString> spdyHeaders = new ArrayList<ByteString>();
       String[] statusParts = response.getStatus().split(" ", 2);
       if (statusParts.length != 2) {
         throw new AssertionError("Unexpected status: " + response.getStatus());
       }
-      spdyHeaders.add(":status");
-      spdyHeaders.add(statusParts[1]);
+      // TODO: constants for well-known header names.
+      spdyHeaders.add(ByteString.encodeUtf8(":status"));
+      spdyHeaders.add(ByteString.encodeUtf8(statusParts[1]));
       // TODO: no ":version" header for HTTP/2.0, only SPDY.
-      spdyHeaders.add(":version");
-      spdyHeaders.add(statusParts[0]);
-      for (String header : response.getHeaders()) {
+      spdyHeaders.add(ByteString.encodeUtf8(":version"));
+      spdyHeaders.add(ByteString.encodeUtf8(statusParts[0]));
+      List<String> headers = response.getHeaders();
+      for (int i = 0, size = headers.size(); i < size; i++) {
+        String header = headers.get(i);
         String[] headerParts = header.split(":", 2);
         if (headerParts.length != 2) {
           throw new AssertionError("Unexpected header: " + header);
         }
-        spdyHeaders.add(headerParts[0].toLowerCase(Locale.US).trim());
-        spdyHeaders.add(headerParts[1].trim());
+        spdyHeaders.add(ByteString.encodeUtf8(headerParts[0].toLowerCase(Locale.US).trim()));
+        spdyHeaders.add(ByteString.encodeUtf8(headerParts[1].trim()));
       }
       byte[] body = response.getBody();
       stream.reply(spdyHeaders, body.length > 0);
@@ -718,6 +736,6 @@ public final class MockWebServer {
   }
 
   enum Transport {
-    HTTP_11, SPDY_3, HTTP_20_DRAFT_06
+    HTTP_11, SPDY_3, HTTP_20_DRAFT_09
   }
 }

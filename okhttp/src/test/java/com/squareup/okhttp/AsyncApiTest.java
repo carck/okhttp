@@ -17,12 +17,17 @@ package com.squareup.okhttp;
 
 import com.squareup.okhttp.internal.RecordingHostnameVerifier;
 import com.squareup.okhttp.internal.SslContextBuilder;
+import com.squareup.okhttp.mockwebserver.Dispatcher;
 import com.squareup.okhttp.mockwebserver.MockResponse;
 import com.squareup.okhttp.mockwebserver.MockWebServer;
 import com.squareup.okhttp.mockwebserver.RecordedRequest;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLContext;
 import org.junit.After;
 import org.junit.Before;
@@ -69,6 +74,26 @@ public final class AsyncApiTest {
         .assertBody("abc");
 
     assertTrue(server.takeRequest().getHeaders().contains("User-Agent: AsyncApiTest"));
+  }
+
+  @Test public void connectionPooling() throws Exception {
+    server.enqueue(new MockResponse().setBody("abc"));
+    server.enqueue(new MockResponse().setBody("def"));
+    server.enqueue(new MockResponse().setBody("ghi"));
+    server.play();
+
+    client.enqueue(new Request.Builder().url(server.getUrl("/a")).build(), receiver);
+    receiver.await(server.getUrl("/a")).assertBody("abc");
+
+    client.enqueue(new Request.Builder().url(server.getUrl("/b")).build(), receiver);
+    receiver.await(server.getUrl("/b")).assertBody("def");
+
+    client.enqueue(new Request.Builder().url(server.getUrl("/c")).build(), receiver);
+    receiver.await(server.getUrl("/c")).assertBody("ghi");
+
+    assertEquals(0, server.takeRequest().getSequenceNumber());
+    assertEquals(1, server.takeRequest().getSequenceNumber());
+    assertEquals(2, server.takeRequest().getSequenceNumber());
   }
 
   @Test public void tls() throws Exception {
@@ -129,5 +154,168 @@ public final class AsyncApiTest {
     client.enqueue(request2, receiver);
     receiver.await(request2.url()).assertCode(200).assertBody("A");
     assertEquals("v1", server.takeRequest().getHeader("If-None-Match"));
+  }
+
+  @Test public void redirect() throws Exception {
+    server.enqueue(new MockResponse()
+        .setResponseCode(301)
+        .addHeader("Location: /b")
+        .addHeader("Test", "Redirect from /a to /b")
+        .setBody("/a has moved!"));
+    server.enqueue(new MockResponse()
+        .setResponseCode(302)
+        .addHeader("Location: /c")
+        .addHeader("Test", "Redirect from /b to /c")
+        .setBody("/b has moved!"));
+    server.enqueue(new MockResponse().setBody("C"));
+    server.play();
+
+    Request request = new Request.Builder().url(server.getUrl("/a")).build();
+    client.enqueue(request, receiver);
+
+    receiver.await(server.getUrl("/c"))
+        .assertCode(200)
+        .assertBody("C")
+        .redirectedBy()
+        .assertCode(302)
+        .assertContainsHeaders("Test: Redirect from /b to /c")
+        .redirectedBy()
+        .assertCode(301)
+        .assertContainsHeaders("Test: Redirect from /a to /b");
+
+    assertEquals(0, server.takeRequest().getSequenceNumber()); // New connection.
+    assertEquals(1, server.takeRequest().getSequenceNumber()); // Connection reused.
+    assertEquals(2, server.takeRequest().getSequenceNumber()); // Connection reused again!
+  }
+
+  @Test public void redirectWithRedirectsDisabled() throws Exception {
+    client.setFollowProtocolRedirects(false);
+    server.enqueue(new MockResponse()
+        .setResponseCode(301)
+        .addHeader("Location: /b")
+        .addHeader("Test", "Redirect from /a to /b")
+        .setBody("/a has moved!"));
+    server.play();
+
+    Request request = new Request.Builder().url(server.getUrl("/a")).build();
+    client.enqueue(request, receiver);
+
+    receiver.await(server.getUrl("/a"))
+        .assertCode(301)
+        .assertBody("/a has moved!")
+        .assertContainsHeaders("Location: /b");
+  }
+
+  @Test public void follow20Redirects() throws Exception {
+    for (int i = 0; i < 20; i++) {
+      server.enqueue(new MockResponse()
+          .setResponseCode(301)
+          .addHeader("Location: /" + (i + 1))
+          .setBody("Redirecting to /" + (i + 1)));
+    }
+    server.enqueue(new MockResponse().setBody("Success!"));
+    server.play();
+
+    Request request = new Request.Builder().url(server.getUrl("/0")).build();
+    client.enqueue(request, receiver);
+    receiver.await(server.getUrl("/20"))
+        .assertCode(200)
+        .assertBody("Success!");
+  }
+
+  @Test public void doesNotFollow21Redirects() throws Exception {
+    for (int i = 0; i < 21; i++) {
+      server.enqueue(new MockResponse()
+          .setResponseCode(301)
+          .addHeader("Location: /" + (i + 1))
+          .setBody("Redirecting to /" + (i + 1)));
+    }
+    server.play();
+
+    Request request = new Request.Builder().url(server.getUrl("/0")).build();
+    client.enqueue(request, receiver);
+    receiver.await(server.getUrl("/20")).assertFailure("Too many redirects: 21");
+  }
+
+  @Test public void canceledBeforeResponseReadIsNeverDelivered() throws Exception {
+    client.getDispatcher().setMaxRequests(1); // Force requests to be executed serially.
+    server.setDispatcher(new Dispatcher() {
+      char nextResponse = 'A';
+      @Override public MockResponse dispatch(RecordedRequest request) {
+        client.cancel("request A");
+        return new MockResponse().setBody(Character.toString(nextResponse++));
+      }
+    });
+    server.play();
+
+    // Canceling a request after the server has received a request but before
+    // it has delivered the response. That request will never be received to the
+    // client.
+    Request requestA = new Request.Builder().url(server.getUrl("/a")).tag("request A").build();
+    client.enqueue(requestA, receiver);
+    assertEquals("/a", server.takeRequest().getPath());
+
+    // We then make a second request (not canceled) to make sure the receiver
+    // has nothing left to wait for.
+    Request requestB = new Request.Builder().url(server.getUrl("/b")).tag("request B").build();
+    client.enqueue(requestB, receiver);
+    assertEquals("/b", server.takeRequest().getPath());
+    receiver.await(requestB.url()).assertBody("B");
+
+    // At this point we know the receiver is ready: if it hasn't received 'A'
+    // yet it never will.
+    receiver.assertNoResponse(requestA.url());
+  }
+
+  @Test public void canceledAfterResponseIsDeliveredDoesNothing() throws Exception {
+    server.enqueue(new MockResponse().setBody("A"));
+    server.play();
+
+    final CountDownLatch latch = new CountDownLatch(1);
+    final AtomicReference<String> bodyRef = new AtomicReference<String>();
+
+    Request request = new Request.Builder().url(server.getUrl("/a")).tag("request A").build();
+    client.enqueue(request, new Response.Receiver() {
+      @Override public void onFailure(Failure failure) {
+        throw new AssertionError();
+      }
+
+      @Override public boolean onResponse(Response response) throws IOException {
+        client.cancel("request A");
+        bodyRef.set(response.body().string());
+        latch.countDown();
+        return true;
+      }
+    });
+
+    latch.await();
+    assertEquals("A", bodyRef.get());
+  }
+
+  @Test public void connectionReuseWhenResponseBodyConsumed() throws Exception {
+    server.enqueue(new MockResponse().setBody("abc"));
+    server.enqueue(new MockResponse().setBody("def"));
+    server.play();
+
+    Request request = new Request.Builder().url(server.getUrl("/a")).build();
+    client.enqueue(request, new Response.Receiver() {
+      @Override public void onFailure(Failure failure) {
+        throw new AssertionError();
+      }
+      @Override public boolean onResponse(Response response) throws IOException {
+        InputStream bytes = response.body().byteStream();
+        assertEquals('a', bytes.read());
+        assertEquals('b', bytes.read());
+        assertEquals('c', bytes.read());
+
+        // This request will share a connection with 'A' cause it's all done.
+        client.enqueue(new Request.Builder().url(server.getUrl("/b")).build(), receiver);
+        return true;
+      }
+    });
+
+    receiver.await(server.getUrl("/b")).assertCode(200).assertBody("def");
+    assertEquals(0, server.takeRequest().getSequenceNumber()); // New connection.
+    assertEquals(1, server.takeRequest().getSequenceNumber()); // Connection reuse!
   }
 }

@@ -16,6 +16,7 @@
 
 package com.squareup.okhttp.internal.spdy;
 
+import com.squareup.okhttp.internal.ByteString;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -28,22 +29,22 @@ public interface FrameReader extends Closeable {
 
   public interface Handler {
     void data(boolean inFinished, int streamId, InputStream in, int length) throws IOException;
+
     /**
      * Create or update incoming headers, creating the corresponding streams
      * if necessary. Frames that trigger this are SPDY SYN_STREAM, HEADERS, and
      * SYN_REPLY, and HTTP/2.0 HEADERS and PUSH_PROMISE.
      *
-     * @param inFinished true if the sender will not send further frames.
      * @param outFinished true if the receiver should not send further frames.
+     * @param inFinished true if the sender will not send further frames.
      * @param streamId the stream owning these headers.
      * @param associatedStreamId the stream that triggered the sender to create
-     *     this stream.
+     * this stream.
      * @param priority or -1 for no priority. For SPDY, priorities range from 0
-     *     (highest) thru 7 (lowest). For HTTP/2.0, priorities range from 0
-     *     (highest) thru 2**31-1 (lowest).
+     * (highest) thru 7 (lowest). For HTTP/2.0, priorities range from 0
      */
     void headers(boolean outFinished, boolean inFinished, int streamId, int associatedStreamId,
-        int priority, List<String> nameValueBlock, HeadersMode headersMode);
+        int priority, List<ByteString> nameValueBlock, HeadersMode headersMode);
     void rstStream(int streamId, ErrorCode errorCode);
     void settings(boolean clearPrevious, Settings settings);
     void noop();

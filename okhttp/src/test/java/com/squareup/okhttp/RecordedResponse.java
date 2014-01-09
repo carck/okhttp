@@ -47,8 +47,9 @@ public class RecordedResponse {
 
   public RecordedResponse assertContainsHeaders(String... expectedHeaders) {
     List<String> actualHeaders = new ArrayList<String>();
-    for (int i = 0; i < response.headerCount(); i++) {
-      actualHeaders.add(response.headerName(i) + ": " + response.headerValue(i));
+    Headers headers = response.headers();
+    for (int i = 0; i < headers.size(); i++) {
+      actualHeaders.add(headers.name(i) + ": " + headers.value(i));
     }
     if (!actualHeaders.containsAll(Arrays.asList(expectedHeaders))) {
       fail("Expected: " + actualHeaders + "\nto contain: " + Arrays.toString(expectedHeaders));
@@ -69,5 +70,21 @@ public class RecordedResponse {
     assertNull(handshake.localPrincipal());
     assertEquals(0, handshake.localCertificates().size());
     return this;
+  }
+
+  /**
+   * Asserts that the current response was redirected and returns a new recorded
+   * response for the original request.
+   */
+  public RecordedResponse redirectedBy() {
+    Response redirectedBy = response.redirectedBy();
+    assertNotNull(redirectedBy);
+    assertNull(redirectedBy.body());
+    return new RecordedResponse(redirectedBy.request(), redirectedBy, null, null);
+  }
+
+  public void assertFailure(String message) {
+    assertNotNull(failure);
+    assertEquals(message, failure.exception().getMessage());
   }
 }

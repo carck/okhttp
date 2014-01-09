@@ -16,6 +16,7 @@
 
 package com.squareup.okhttp.internal.spdy;
 
+import com.squareup.okhttp.internal.ByteString;
 import com.squareup.okhttp.internal.NamedRunnable;
 import com.squareup.okhttp.internal.Util;
 import java.io.Closeable;
@@ -59,7 +60,7 @@ public final class SpdyConnection implements Closeable {
       Integer.MAX_VALUE, 60, TimeUnit.SECONDS, new SynchronousQueue<Runnable>(),
       Util.daemonThreadFactory("OkHttp SpdyConnection"));
 
-  /** The protocol variant, like SPDY/3 or HTTP-draft-06/2.0. */
+  /** The protocol variant, like SPDY/3 or HTTP-draft-09/2.0. */
   final Variant variant;
 
   /** True if this peer initiated the connection. */
@@ -87,6 +88,8 @@ public final class SpdyConnection implements Closeable {
   /** Lazily-created settings for the peer. */
   Settings settings;
 
+  ByteArrayPool bufferPool = new ByteArrayPool(8 * Settings.DEFAULT_INITIAL_WINDOW_SIZE);
+
   private SpdyConnection(Builder builder) {
     variant = builder.variant;
     client = builder.client;
@@ -99,6 +102,15 @@ public final class SpdyConnection implements Closeable {
     hostName = builder.hostName;
 
     new Thread(new Reader(), "Spdy Reader " + hostName).start();
+  }
+
+  /**
+   * The protocol name, like {@code spdy/3} or {@code HTTP-draft-09/2.0}.
+   *
+   * @see com.squareup.okhttp.internal.spdy.Variant#getProtocol()
+   */
+  public String getProtocol() {
+     return variant.getProtocol();
   }
 
   /**
@@ -146,12 +158,12 @@ public final class SpdyConnection implements Closeable {
    * @param in true to create an input stream that the remote peer can use to
    *     send data to us. Corresponds to {@code FLAG_UNIDIRECTIONAL}.
    */
-  public SpdyStream newStream(List<String> requestHeaders, boolean out, boolean in)
+  public SpdyStream newStream(List<ByteString> requestHeaders, boolean out, boolean in)
       throws IOException {
     boolean outFinished = !out;
     boolean inFinished = !in;
     int associatedStreamId = 0;  // TODO: permit the caller to specify an associated stream?
-    int priority = 0; // TODO: permit the caller to specify a priority?
+    int priority = -1; // TODO: permit the caller to specify a priority?
     int slot = 0; // TODO: permit the caller to specify a slot?
     SpdyStream stream;
     int streamId;
@@ -178,7 +190,7 @@ public final class SpdyConnection implements Closeable {
     return stream;
   }
 
-  void writeSynReply(int streamId, boolean outFinished, List<String> alternating)
+  void writeSynReply(int streamId, boolean outFinished, List<ByteString> alternating)
       throws IOException {
     frameWriter.synReply(outFinished, streamId, alternating);
   }
@@ -416,8 +428,8 @@ public final class SpdyConnection implements Closeable {
       return this;
     }
 
-    public Builder http20Draft06() {
-      this.variant = Variant.HTTP_20_DRAFT_06;
+    public Builder http20Draft09() {
+      this.variant = Variant.HTTP_20_DRAFT_09;
       return this;
     }
 
@@ -461,7 +473,7 @@ public final class SpdyConnection implements Closeable {
     }
 
     @Override public void headers(boolean outFinished, boolean inFinished, int streamId,
-        int associatedStreamId, int priority, List<String> nameValueBlock,
+        int associatedStreamId, int priority, List<ByteString> nameValueBlock,
         HeadersMode headersMode) {
       SpdyStream stream;
       synchronized (SpdyConnection.this) {

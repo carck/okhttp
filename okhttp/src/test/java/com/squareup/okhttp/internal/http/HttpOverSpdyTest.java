@@ -15,6 +15,7 @@
  */
 package com.squareup.okhttp.internal.http;
 
+
 import com.squareup.okhttp.HttpResponseCache;
 import com.squareup.okhttp.OkHttpClient;
 import com.squareup.okhttp.internal.RecordingAuthenticator;
@@ -23,7 +24,10 @@ import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.mockwebserver.MockResponse;
 import com.squareup.okhttp.mockwebserver.MockWebServer;
 import com.squareup.okhttp.mockwebserver.RecordedRequest;
+import com.squareup.okhttp.mockwebserver.SocketPolicy;
+
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -39,12 +43,19 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPOutputStream;
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSession;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -54,7 +65,16 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /** Test how SPDY interacts with HTTP features. */
-public final class HttpOverSpdyTest {
+public abstract class HttpOverSpdyTest {
+
+  /** Transport to test, for example {@code spdy/3} */
+  private final String transport;
+  protected String hostHeader = ":host";
+
+  protected HttpOverSpdyTest(String transport){
+    this.transport = transport;
+  }
+
   private static final HostnameVerifier NULL_HOSTNAME_VERIFIER = new HostnameVerifier() {
     public boolean verify(String hostname, SSLSession session) {
       return true;
@@ -69,10 +89,11 @@ public final class HttpOverSpdyTest {
 
   @Before public void setUp() throws Exception {
     server.useHttps(sslContext.getSocketFactory(), false);
+    client.setTransports(Arrays.asList(transport, "http/1.1"));
     client.setSslSocketFactory(sslContext.getSocketFactory());
     client.setHostnameVerifier(NULL_HOSTNAME_VERIFIER);
     String systemTmpDir = System.getProperty("java.io.tmpdir");
-    File cacheDir = new File(systemTmpDir, "HttpCache-" + UUID.randomUUID());
+    File cacheDir = new File(systemTmpDir, "HttpCache-" + transport + "-" + UUID.randomUUID());
     cache = new HttpResponseCache(cacheDir, Integer.MAX_VALUE);
   }
 
@@ -94,7 +115,7 @@ public final class HttpOverSpdyTest {
     RecordedRequest request = server.takeRequest();
     assertEquals("GET /foo HTTP/1.1", request.getRequestLine());
     assertContains(request.getHeaders(), ":scheme: https");
-    assertContains(request.getHeaders(), ":host: " + hostName + ":" + server.getPort());
+    assertContains(request.getHeaders(), hostHeader + ": " + hostName + ":" + server.getPort());
   }
 
   @Test public void emptyResponse() throws IOException {
@@ -173,6 +194,20 @@ public final class HttpOverSpdyTest {
     assertEquals(1, server.takeRequest().getSequenceNumber());
   }
 
+  @Test @Ignore public void synchronousSpdyRequest() throws Exception {
+    server.enqueue(new MockResponse().setBody("A"));
+    server.enqueue(new MockResponse().setBody("A"));
+    server.play();
+
+    ExecutorService executor = Executors.newCachedThreadPool();
+    CountDownLatch countDownLatch = new CountDownLatch(2);
+    executor.execute(new SpdyRequest("/r1", countDownLatch));
+    executor.execute(new SpdyRequest("/r2", countDownLatch));
+    countDownLatch.await();
+    assertEquals(0, server.takeRequest().getSequenceNumber());
+    assertEquals(1, server.takeRequest().getSequenceNumber());
+  }
+
   @Test public void gzippedResponseBody() throws Exception {
     server.enqueue(new MockResponse().addHeader("Content-Encoding: gzip")
         .setBody(gzip("ABCABCABC".getBytes(Util.UTF_8))));
@@ -224,6 +259,16 @@ public final class HttpOverSpdyTest {
     assertEquals("ABC", readAscii(in, 3));
     assertEquals(-1, in.read());
     assertEquals(-1, in.read());
+  }
+
+  @Test(timeout = 3000) public void readResponseHeaderTimeout() throws Exception {
+    server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+    server.enqueue(new MockResponse().setBody("A"));
+    server.play();
+
+    HttpURLConnection connection = client.open(server.getUrl("/"));
+    connection.setReadTimeout(1000);
+    assertContent("A", connection, Integer.MAX_VALUE);
   }
 
   @Test public void responsesAreCached() throws IOException {
@@ -320,5 +365,25 @@ public final class HttpOverSpdyTest {
     gzippedOut.write(bytes);
     gzippedOut.close();
     return bytesOut.toByteArray();
+  }
+
+  class SpdyRequest implements Runnable {
+    String path;
+    CountDownLatch countDownLatch;
+    public SpdyRequest(String path, CountDownLatch countDownLatch) {
+      this.path = path;
+      this.countDownLatch = countDownLatch;
+    }
+
+    @Override public void run() {
+      try {
+        HttpURLConnection conn = null;
+        conn = (HttpURLConnection) client.open(server.getUrl(path));
+        assertEquals("A", readAscii(conn.getInputStream(), 1));
+        countDownLatch.countDown();
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    }
   }
 }

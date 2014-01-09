@@ -392,4 +392,12 @@ public final class Util {
       }
     };
   }
+
+  public static List<ByteString> byteStringList(String... strings) {
+    List<ByteString> result = new ArrayList<ByteString>(strings.length);
+    for (String string : strings) {
+      result.add(ByteString.encodeUtf8(string));
+    }
+    return result;
+  }
 }

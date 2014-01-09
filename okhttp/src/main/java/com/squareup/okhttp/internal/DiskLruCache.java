@@ -30,7 +30,6 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
-import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -562,7 +561,7 @@ public final class DiskLruCache implements Closeable {
    */
   private boolean journalRebuildRequired() {
     final int redundantOpCompactThreshold = 2000;
-    return redundantOpCount >= redundantOpCompactThreshold //
+    return redundantOpCount >= redundantOpCompactThreshold
         && redundantOpCount >= lruEntries.size();
   }
 
@@ -623,7 +622,9 @@ public final class DiskLruCache implements Closeable {
     if (journalWriter == null) {
       return; // Already closed.
     }
-    for (Entry entry : new ArrayList<Entry>(lruEntries.values())) {
+    // Copying for safe iteration.
+    for (Object next : lruEntries.values().toArray()) {
+      Entry entry = (Entry) next;
       if (entry.currentEditor != null) {
         entry.currentEditor.abort();
       }

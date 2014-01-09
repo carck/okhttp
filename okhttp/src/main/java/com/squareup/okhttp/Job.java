@@ -17,7 +17,10 @@ package com.squareup.okhttp;
 
 import com.squareup.okhttp.internal.http.HttpAuthenticator;
 import com.squareup.okhttp.internal.http.HttpEngine;
+import com.squareup.okhttp.internal.http.HttpURLConnectionImpl;
+import com.squareup.okhttp.internal.http.OkHeaders;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.ProtocolException;
 import java.net.Proxy;
 import java.net.URL;
@@ -35,9 +38,13 @@ final class Job implements Runnable {
   private final Dispatcher dispatcher;
   private final OkHttpClient client;
   private final Response.Receiver responseReceiver;
+  private int redirectionCount;
+
+  volatile boolean canceled;
 
   /** The request; possibly a consequence of redirects or auth headers. */
   private Request request;
+  private HttpEngine engine;
 
   public Job(Dispatcher dispatcher, OkHttpClient client, Request request,
       Response.Receiver responseReceiver) {
@@ -47,31 +54,49 @@ final class Job implements Runnable {
     this.responseReceiver = responseReceiver;
   }
 
+  String host() {
+    return request.url().getHost();
+  }
+
+  Request request() {
+    return request;
+  }
+
   Object tag() {
     return request.tag();
   }
 
   @Override public void run() {
+    String oldName = Thread.currentThread().getName();
+    Thread.currentThread().setName("OkHttp " + request.urlString());
     try {
       Response response = execute();
-      responseReceiver.onResponse(response);
+      if (response != null && !canceled) {
+        responseReceiver.onResponse(response);
+      }
     } catch (IOException e) {
       responseReceiver.onFailure(new Failure.Builder()
           .request(request)
           .exception(e)
           .build());
     } finally {
-      // TODO: close the response body
-      // TODO: release the HTTP engine (potentially multiple!)
+      engine.release(true); // Release the connection if it isn't already released.
+      Thread.currentThread().setName(oldName);
       dispatcher.finished(this);
     }
   }
 
+  /**
+   * Performs the request and returns the response. May return null if this job
+   * was canceled.
+   */
   private Response execute() throws IOException {
     Connection connection = null;
     Response redirectedBy = null;
 
     while (true) {
+      if (canceled) return null;
+
       Request.Body body = request.body();
       if (body != null) {
         MediaType contentType = body.contentType();
@@ -82,7 +107,7 @@ final class Job implements Runnable {
 
         long contentLength = body.contentLength();
         if (contentLength != -1) {
-          requestBuilder.setContentLength(contentLength);
+          requestBuilder.header("Content-Length", Long.toString(contentLength));
           requestBuilder.removeHeader("Transfer-Encoding");
         } else {
           requestBuilder.header("Transfer-Encoding", "chunked");
@@ -92,7 +117,7 @@ final class Job implements Runnable {
         request = requestBuilder.build();
       }
 
-      HttpEngine engine = newEngine(connection);
+      engine = new HttpEngine(client, request, false, connection, null);
       engine.sendRequest();
 
       if (body != null) {
@@ -101,31 +126,26 @@ final class Job implements Runnable {
 
       engine.readResponse();
 
-      Response engineResponse = engine.getResponse();
-      Response response = engineResponse.newBuilder()
-          .body(new Dispatcher.RealResponseBody(engineResponse, engine.getResponseBody()))
-          .redirectedBy(redirectedBy)
-          .build();
-
+      Response response = engine.getResponse();
       Request redirect = processResponse(engine, response);
 
       if (redirect == null) {
         engine.automaticallyReleaseConnectionToPool();
-        return response;
+        return response.newBuilder()
+            .body(new RealResponseBody(response, engine.getResponseBody()))
+            .redirectedBy(redirectedBy)
+            .build();
       }
 
-      // TODO: fail if too many redirects
-      // TODO: fail if not following redirects
-      // TODO: release engine
+      if (!sameConnection(request, redirect)) {
+        engine.automaticallyReleaseConnectionToPool();
+      }
 
-      connection = sameConnection(request, redirect) ? engine.getConnection() : null;
-      redirectedBy = response;
+      engine.release(false);
+      connection = engine.getConnection();
+      redirectedBy = response.newBuilder().redirectedBy(redirectedBy).build(); // Chained.
       request = redirect;
     }
-  }
-
-  HttpEngine newEngine(Connection connection) throws IOException {
-    return new HttpEngine(client, request, false, connection, null);
   }
 
   /**
@@ -156,6 +176,14 @@ final class Job implements Runnable {
       case HTTP_MOVED_TEMP:
       case HTTP_SEE_OTHER:
       case HTTP_TEMP_REDIRECT:
+        if (!client.getFollowProtocolRedirects()) {
+          return null; // This client has is configured to not follow redirects.
+        }
+
+        if (++redirectionCount > HttpURLConnectionImpl.MAX_REDIRECTS) {
+          throw new ProtocolException("Too many redirects: " + redirectionCount);
+        }
+
         String method = request.method();
         if (responseCode == HTTP_TEMP_REDIRECT && !method.equals("GET") && !method.equals("HEAD")) {
           // "If the 307 status code is received in response to a request other than GET or HEAD,
@@ -184,5 +212,32 @@ final class Job implements Runnable {
     return a.url().getHost().equals(b.url().getHost())
         && getEffectivePort(a.url()) == getEffectivePort(b.url())
         && a.url().getProtocol().equals(b.url().getProtocol());
+  }
+
+  static class RealResponseBody extends Response.Body {
+    private final Response response;
+    private final InputStream in;
+
+    RealResponseBody(Response response, InputStream in) {
+      this.response = response;
+      this.in = in;
+    }
+
+    @Override public boolean ready() throws IOException {
+      return true;
+    }
+
+    @Override public MediaType contentType() {
+      String contentType = response.header("Content-Type");
+      return contentType != null ? MediaType.parse(contentType) : null;
+    }
+
+    @Override public long contentLength() {
+      return OkHeaders.contentLength(response);
+    }
+
+    @Override public InputStream byteStream() {
+      return in;
+    }
   }
 }

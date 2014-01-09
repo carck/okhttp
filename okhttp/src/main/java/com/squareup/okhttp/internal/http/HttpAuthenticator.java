@@ -16,6 +16,7 @@
  */
 package com.squareup.okhttp.internal.http;
 
+import com.squareup.okhttp.Headers;
 import com.squareup.okhttp.OkAuthenticator;
 import com.squareup.okhttp.OkAuthenticator.Challenge;
 import com.squareup.okhttp.Request;
@@ -40,7 +41,8 @@ public final class HttpAuthenticator {
   public static final OkAuthenticator SYSTEM_DEFAULT = new OkAuthenticator() {
     @Override public Credential authenticate(
         Proxy proxy, URL url, List<Challenge> challenges) throws IOException {
-      for (Challenge challenge : challenges) {
+      for (int i = 0, size = challenges.size(); i < size; i++) {
+        Challenge challenge = challenges.get(i);
         if (!"Basic".equalsIgnoreCase(challenge.getScheme())) {
           continue;
         }
@@ -57,7 +59,8 @@ public final class HttpAuthenticator {
 
     @Override public Credential authenticateProxy(
         Proxy proxy, URL url, List<Challenge> challenges) throws IOException {
-      for (Challenge challenge : challenges) {
+      for (int i = 0, size = challenges.size(); i < size; i++) {
+        Challenge challenge = challenges.get(i);
         if (!"Basic".equalsIgnoreCase(challenge.getScheme())) {
           continue;
         }
