@@ -375,12 +375,6 @@ public class HttpURLConnectionImpl extends HttpURLConnection {
 
       return true;
     } catch (IOException e) {
-      HttpEngine retryEngine = httpEngine.recover(e);
-      if (retryEngine != null) {
-        httpEngine = retryEngine;
-        return false;
-      }
-
       // Give up; recovery is not possible.
       httpEngineFailure = e;
       throw e;
