@@ -15,6 +15,7 @@
  */
 package com.squareup.okhttp;
 
+import com.squareup.okhttp.internal.NamedRunnable;
 import com.squareup.okhttp.internal.http.HttpAuthenticator;
 import com.squareup.okhttp.internal.http.HttpEngine;
 import com.squareup.okhttp.internal.http.HttpURLConnectionImpl;
@@ -34,7 +35,7 @@ import static com.squareup.okhttp.internal.http.HttpURLConnectionImpl.HTTP_SEE_O
 import static com.squareup.okhttp.internal.http.HttpURLConnectionImpl.HTTP_UNAUTHORIZED;
 import static com.squareup.okhttp.internal.http.StatusLine.HTTP_TEMP_REDIRECT;
 
-final class Job implements Runnable {
+final class Job extends NamedRunnable {
   private final Dispatcher dispatcher;
   private final OkHttpClient client;
   private final Response.Receiver responseReceiver;
@@ -48,6 +49,7 @@ final class Job implements Runnable {
 
   public Job(Dispatcher dispatcher, OkHttpClient client, Request request,
       Response.Receiver responseReceiver) {
+    super("OkHttp %s", request.urlString());
     this.dispatcher = dispatcher;
     this.client = client;
     this.request = request;
@@ -66,11 +68,9 @@ final class Job implements Runnable {
     return request.tag();
   }
 
-  @Override public void run() {
-    String oldName = Thread.currentThread().getName();
-    Thread.currentThread().setName("OkHttp " + request.urlString());
+  @Override protected void execute() {
     try {
-      Response response = execute();
+      Response response = getResponse();
       if (response != null && !canceled) {
         responseReceiver.onResponse(response);
       }
@@ -81,7 +81,6 @@ final class Job implements Runnable {
           .build());
     } finally {
       engine.release(true); // Release the connection if it isn't already released.
-      Thread.currentThread().setName(oldName);
       dispatcher.finished(this);
     }
   }
@@ -90,41 +89,54 @@ final class Job implements Runnable {
    * Performs the request and returns the response. May return null if this job
    * was canceled.
    */
-  private Response execute() throws IOException {
-    Connection connection = null;
+  private Response getResponse() throws IOException {
     Response redirectedBy = null;
+
+    // Copy body metadata to the appropriate request headers.
+    Request.Body body = request.body();
+    if (body != null) {
+      MediaType contentType = body.contentType();
+      if (contentType == null) throw new IllegalStateException("contentType == null");
+
+      Request.Builder requestBuilder = request.newBuilder();
+      requestBuilder.header("Content-Type", contentType.toString());
+
+      long contentLength = body.contentLength();
+      if (contentLength != -1) {
+        requestBuilder.header("Content-Length", Long.toString(contentLength));
+        requestBuilder.removeHeader("Transfer-Encoding");
+      } else {
+        requestBuilder.header("Transfer-Encoding", "chunked");
+        requestBuilder.removeHeader("Content-Length");
+      }
+
+      request = requestBuilder.build();
+    }
+
+    // Create the initial HTTP engine. Retries and redirects need new engine for each attempt.
+    engine = new HttpEngine(client, request, false, null, null, null);
 
     while (true) {
       if (canceled) return null;
 
-      Request.Body body = request.body();
-      if (body != null) {
-        MediaType contentType = body.contentType();
-        if (contentType == null) throw new IllegalStateException("contentType == null");
+      try {
+        engine.sendRequest();
 
-        Request.Builder requestBuilder = request.newBuilder();
-        requestBuilder.header("Content-Type", contentType.toString());
-
-        long contentLength = body.contentLength();
-        if (contentLength != -1) {
-          requestBuilder.header("Content-Length", Long.toString(contentLength));
-          requestBuilder.removeHeader("Transfer-Encoding");
-        } else {
-          requestBuilder.header("Transfer-Encoding", "chunked");
-          requestBuilder.removeHeader("Content-Length");
+        if (body != null) {
+          body.writeTo(engine.getRequestBody());
         }
 
-        request = requestBuilder.build();
+        engine.readResponse();
+      } catch (IOException e) {
+        HttpEngine retryEngine = engine.recover(e);
+        if (retryEngine != null) {
+          engine = retryEngine;
+          continue;
+        }
+
+        // Give up; recovery is not possible.
+        throw e;
       }
-
-      engine = new HttpEngine(client, request, false, connection, null);
-      engine.sendRequest();
-
-      if (body != null) {
-        body.writeTo(engine.getRequestBody());
-      }
-
-      engine.readResponse();
 
       Response response = engine.getResponse();
       Request redirect = processResponse(engine, response);
@@ -142,9 +154,10 @@ final class Job implements Runnable {
       }
 
       engine.release(false);
-      connection = engine.getConnection();
+      Connection connection = engine.getConnection();
       redirectedBy = response.newBuilder().redirectedBy(redirectedBy).build(); // Chained.
       request = redirect;
+      engine = new HttpEngine(client, request, false, connection, null, null);
     }
   }
 

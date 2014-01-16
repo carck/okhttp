@@ -18,6 +18,7 @@
 package com.squareup.okhttp.mockwebserver;
 
 import com.squareup.okhttp.internal.ByteString;
+import com.squareup.okhttp.internal.NamedRunnable;
 import com.squareup.okhttp.internal.Platform;
 import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.spdy.IncomingStreamHandler;
@@ -240,13 +241,13 @@ public final class MockWebServer {
    */
   public void play(int port) throws IOException {
     if (executor != null) throw new IllegalStateException("play() already called");
-    executor = Executors.newCachedThreadPool();
+    executor = Executors.newCachedThreadPool(Util.threadFactory("MockWebServer", false));
     serverSocket = new ServerSocket(port);
     serverSocket.setReuseAddress(true);
 
     this.port = serverSocket.getLocalPort();
-    executor.execute(namedRunnable("MockWebServer-accept-" + port, new Runnable() {
-      public void run() {
+    executor.execute(new NamedRunnable("MockWebServer %s", port) {
+      @Override protected void execute() {
         try {
           acceptConnections();
         } catch (Throwable e) {
@@ -285,7 +286,7 @@ public final class MockWebServer {
           }
         }
       }
-    }));
+    });
   }
 
   public void shutdown() throws IOException {
@@ -295,11 +296,10 @@ public final class MockWebServer {
   }
 
   private void serveConnection(final Socket raw) {
-    String name = "MockWebServer-" + raw.getRemoteSocketAddress();
-    executor.execute(namedRunnable(name, new Runnable() {
+    executor.execute(new NamedRunnable("MockWebServer %s", raw.getRemoteSocketAddress()) {
       int sequenceNumber = 0;
 
-      public void run() {
+      @Override protected void execute() {
         try {
           processConnection();
         } catch (Exception e) {
@@ -420,7 +420,7 @@ public final class MockWebServer {
         sequenceNumber++;
         return true;
       }
-    }));
+    });
   }
 
   private void processHandshakeFailure(Socket raw) throws Exception {
@@ -536,28 +536,25 @@ public final class MockWebServer {
 
     InputStream in = response.getBodyStream();
     if (in == null) return;
-    int bytesPerSecond = response.getBytesPerSecond();
 
-    // Stream data in MTU-sized increments, with a minimum of one packet per second.
-    byte[] buffer = bytesPerSecond >= 1452 ? new byte[1452] : new byte[bytesPerSecond];
-    long delayMs = bytesPerSecond == Integer.MAX_VALUE
-        ? 0
-        : (1000 * buffer.length) / bytesPerSecond;
+    // Stream data in MTU-sized increments, sleeping every bytesPerPeriod bytes.
+    byte[] buffer = new byte[1452];
+    while (true) {
+      int bytesPerPeriod = response.getThrottleBytesPerPeriod();
+      for (int b = 0; b < bytesPerPeriod; ) {
+        int read = in.read(buffer, 0, Math.min(buffer.length, bytesPerPeriod - b));
+        if (read == -1) return;
 
-    int read;
-    long sinceDelay = 0;
-    while ((read = in.read(buffer)) != -1) {
-      out.write(buffer, 0, read);
-      out.flush();
+        out.write(buffer, 0, read);
+        out.flush();
+        b += read;
+      }
 
-      sinceDelay += read;
-      if (sinceDelay >= buffer.length && delayMs > 0) {
-        sinceDelay %= buffer.length;
-        try {
-          Thread.sleep(delayMs);
-        } catch (InterruptedException e) {
-          throw new AssertionError();
-        }
+      try {
+        long delayMs = response.getThrottleUnit().toMillis(response.getThrottlePeriod());
+        if (delayMs != 0) Thread.sleep(delayMs);
+      } catch (InterruptedException e) {
+        throw new AssertionError();
       }
     }
   }
@@ -626,20 +623,6 @@ public final class MockWebServer {
         super.write(oneByte);
       }
     }
-  }
-
-  private static Runnable namedRunnable(final String name, final Runnable runnable) {
-    return new Runnable() {
-      public void run() {
-        String originalName = Thread.currentThread().getName();
-        Thread.currentThread().setName(name);
-        try {
-          runnable.run();
-        } finally {
-          Thread.currentThread().setName(originalName);
-        }
-      }
-    };
   }
 
   /** Processes HTTP requests layered over SPDY/3. */
