@@ -16,7 +16,6 @@
 
 package com.squareup.okhttp.internal.spdy;
 
-import com.squareup.okhttp.internal.ByteString;
 import com.squareup.okhttp.internal.Util;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -37,6 +36,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 public final class MockSpdyPeer implements Closeable {
   private int frameCount = 0;
   private final boolean client;
+  private final Variant variant;
   private final ByteArrayOutputStream bytesOut = new ByteArrayOutputStream();
   private final FrameWriter frameWriter;
   private final List<OutFrame> outFrames = new ArrayList<OutFrame>();
@@ -47,9 +47,10 @@ public final class MockSpdyPeer implements Closeable {
   private ServerSocket serverSocket;
   private Socket socket;
 
-  public MockSpdyPeer(boolean client) {
+  public MockSpdyPeer(Variant variant, boolean client) {
     this.client = client;
-    this.frameWriter = Variant.SPDY3.newWriter(bytesOut, client);
+    this.variant = variant;
+    this.frameWriter = variant.newWriter(bytesOut, variant.defaultOkHttpSettings(client), client);
   }
 
   public void acceptFrame() {
@@ -109,7 +110,7 @@ public final class MockSpdyPeer implements Closeable {
     socket = serverSocket.accept();
     OutputStream out = socket.getOutputStream();
     InputStream in = socket.getInputStream();
-    FrameReader reader = Variant.SPDY3.newReader(in, client);
+    FrameReader reader = variant.newReader(in, variant.initialPeerSettings(client), client);
 
     Iterator<OutFrame> outFramesIterator = outFrames.iterator();
     byte[] outBytes = bytesOut.toByteArray();
@@ -185,7 +186,7 @@ public final class MockSpdyPeer implements Closeable {
     public int priority;
     public ErrorCode errorCode;
     public int deltaWindowSize;
-    public List<ByteString> nameValueBlock;
+    public List<Header> nameValueBlock;
     public byte[] data;
     public Settings settings;
     public HeadersMode headersMode;
@@ -203,7 +204,7 @@ public final class MockSpdyPeer implements Closeable {
     }
 
     @Override public void headers(boolean outFinished, boolean inFinished, int streamId,
-        int associatedStreamId, int priority, List<ByteString> nameValueBlock,
+        int associatedStreamId, int priority, List<Header> nameValueBlock,
         HeadersMode headersMode) {
       if (this.type != -1) throw new IllegalStateException();
       this.type = Spdy3.TYPE_HEADERS;

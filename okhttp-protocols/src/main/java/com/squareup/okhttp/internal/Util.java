@@ -16,6 +16,7 @@
 
 package com.squareup.okhttp.internal;
 
+import com.squareup.okhttp.internal.spdy.Header;
 import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.EOFException;
@@ -400,11 +401,22 @@ public final class Util {
     };
   }
 
-  public static List<ByteString> byteStringList(String... strings) {
-    List<ByteString> result = new ArrayList<ByteString>(strings.length);
-    for (String string : strings) {
-      result.add(ByteString.encodeUtf8(string));
+  public static List<Header> headerEntries(String... elements) {
+    List<Header> result = new ArrayList<Header>(elements.length / 2);
+    for (int i = 0; i < elements.length; i += 2) {
+      result.add(new Header(elements[i], elements[i + 1]));
     }
     return result;
+  }
+
+  /** Mutates the byte array to ensure all characters are lowercase. */
+  public static void asciiLowerCase(byte[] bytes) {
+    for (int i = 0; i < bytes.length; i++) {
+      bytes[i] = asciiLowerCase(bytes[i]);
+    }
+  }
+
+  public static byte asciiLowerCase(byte c) {
+    return 'A' <= c && c <= 'Z' ? (byte) (c + 'a' - 'A') : c;
   }
 }

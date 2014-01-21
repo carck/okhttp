@@ -168,7 +168,7 @@ public class HttpEngine {
         ? responseCache.get(request)
         : null;
     long now = System.currentTimeMillis();
-    CacheStrategy cacheStrategy = CacheStrategy.get(now, cacheResponse, request);
+    CacheStrategy cacheStrategy = new CacheStrategy.Factory(now, request, cacheResponse).get();
     responseSource = cacheStrategy.source;
     request = cacheStrategy.request;
 
@@ -234,7 +234,7 @@ public class HttpEngine {
         hostnameVerifier = client.getHostnameVerifier();
       }
       Address address = new Address(uriHost, getEffectivePort(request.url()), sslSocketFactory,
-          hostnameVerifier, client.getAuthenticator(), client.getProxy(), client.getTransports());
+          hostnameVerifier, client.getAuthenticator(), client.getProxy(), client.getProtocols());
       routeSelector = new RouteSelector(address, request.uri(), client.getProxySelector(),
           client.getConnectionPool(), Dns.getDefault(), client.getRoutesDatabase());
     }

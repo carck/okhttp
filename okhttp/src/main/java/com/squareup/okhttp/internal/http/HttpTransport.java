@@ -18,6 +18,7 @@ package com.squareup.okhttp.internal.http;
 
 import com.squareup.okhttp.Connection;
 import com.squareup.okhttp.Headers;
+import com.squareup.okhttp.Protocol;
 import com.squareup.okhttp.Request;
 import com.squareup.okhttp.Response;
 import com.squareup.okhttp.internal.AbstractOutputStream;
@@ -34,13 +35,6 @@ import static com.squareup.okhttp.internal.Util.checkOffsetAndCount;
 import static com.squareup.okhttp.internal.http.StatusLine.HTTP_CONTINUE;
 
 public final class HttpTransport implements Transport {
-  /**
-   * The timeout to use while discarding a stream of input data. Since this is
-   * used for connection reuse, this timeout should be significantly less than
-   * the time it takes to establish a new connection.
-   */
-  private static final int DISCARD_STREAM_TIMEOUT_MILLIS = 100;
-
   public static final int DEFAULT_CHUNK_LENGTH = 1024;
 
   private final HttpEngine httpEngine;
@@ -155,7 +149,8 @@ public final class HttpTransport implements Transport {
 
       Response.Builder responseBuilder = new Response.Builder()
           .statusLine(statusLine)
-          .header(OkHeaders.SELECTED_TRANSPORT, "http/1.1");
+          .header(OkHeaders.SELECTED_TRANSPORT, Protocol.HTTP_11.name.utf8())
+          .header(OkHeaders.SELECTED_PROTOCOL, Protocol.HTTP_11.name.utf8());
 
       Headers.Builder headersBuilder = new Headers.Builder();
       OkHeaders.readHeaders(headersBuilder, in);

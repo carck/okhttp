@@ -15,11 +15,12 @@
  */
 package com.squareup.okhttp.internal;
 
-import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Arrays;
+
+import static com.squareup.okhttp.internal.Util.asciiLowerCase;
 
 /**
  * An immutable sequence of bytes.
@@ -37,41 +38,24 @@ public final class ByteString {
   private transient int hashCode; // Lazily computed; 0 if unknown.
   private transient String utf8; // Lazily computed.
 
-  /**
-   * A singleton empty {@code ByteString}.
-   */
+  /** A singleton empty {@code ByteString}. */
   public static final ByteString EMPTY = new ByteString(Util.EMPTY_BYTE_ARRAY);
 
   /**
-   * Returns a new byte string containing the bytes of {@code data}, or
-   * {@link #EMPTY} if {@code data} is an empty array.
+   * Returns a new byte string containing a clone of the bytes of {@code data}.
    */
   public static ByteString of(byte... data) {
     return new ByteString(data.clone());
   }
 
-  /**
-   * Returns a new byte string containing the bytes of {@code data}
-   * from {@code offset} to {@code offset + count - 1}, inclusive, or
-   * {@link #EMPTY} if {@code count} is zero.
-   */
-  public static ByteString of(byte[] data, int offset, int count) {
-    byte[] bytes = new byte[count];
-    System.arraycopy(data, offset, bytes, 0, count);
-    return new ByteString(bytes);
-  }
-
-  /**
-   * Returns a new byte string containing the {@code UTF-8} bytes of {@code s},
-   * or {@link #EMPTY} if {@code s} is zero length.
-   */
+  /** Returns a new byte string containing the {@code UTF-8} bytes of {@code s}. */
   public static ByteString encodeUtf8(String s) {
     ByteString byteString = new ByteString(s.getBytes(Util.UTF_8));
     byteString.utf8 = s;
     return byteString;
   }
 
-  /** Constructs a new {@code String} by decoding the bytes as UTF-8. */
+  /** Constructs a new {@code String} by decoding the bytes as {@code UTF-8}. */
   public String utf8() {
     String result = utf8;
     // We don't care if we double-allocate in racy code.
@@ -79,28 +63,45 @@ public final class ByteString {
   }
 
   /**
-   * Returns true when {@code s} is not null and its {@code UTF-8} encoded
-   * bytes are equivalent to the bytes wrapped by this byte string.
+   * Returns true when {@code ascii} is not null and equals the bytes wrapped
+   * by this byte string.
    */
-  public boolean utf8Equals(String s) {
-    if (s == null) return false;
-    // TODO: avoid allocation
-    return utf8().equals(s);
+  public boolean equalsAscii(String ascii) {
+    if (ascii == null || data.length != ascii.length()) {
+      return false;
+    }
+    if (ascii == this.utf8) {
+      return true;
+    }
+    for (int i = 0; i < data.length; i++) {
+      if (data[i] != ascii.charAt(i)) return false;
+    }
+    return true;
   }
 
   /**
    * Reads {@code count} bytes from {@code in} and returns the result.
    *
-   * @throws EOFException if {@code in} has fewer than {@code count} bytes to
-   * read.
+   * @throws java.io.EOFException if {@code in} has fewer than {@code count}
+   * bytes to read.
    */
   public static ByteString read(InputStream in, int count) throws IOException {
     byte[] result = new byte[count];
-    for (int c = 0; c < count; ) {
-      int read = in.read(result, c, count - c);
-      if (read == -1) throw new EOFException("Expected " + count + "; received " + c);
-      c += read;
-    }
+    Util.readFully(in, result);
+    return new ByteString(result);
+  }
+
+  /**
+   * Reads {@code count} bytes from {@code in} and returns the result converted
+   * to ASCII lowercase.
+   *
+   * @throws java.io.EOFException if {@code in} has fewer than {@code count}
+   * bytes to read.
+   */
+  public static ByteString readLowerCase(InputStream in, int count) throws IOException {
+    byte[] result = new byte[count];
+    Util.readFully(in, result);
+    asciiLowerCase(result);
     return new ByteString(result);
   }
 
@@ -115,7 +116,7 @@ public final class ByteString {
       System.arraycopy(byteString.data, 0, result, pos, byteString.size());
       pos += byteString.size();
     }
-    return ByteString.of(result);
+    return new ByteString(result);
   }
 
   private ByteString(byte[] data) {
@@ -139,11 +140,6 @@ public final class ByteString {
   /** Writes the contents of this byte string to {@code out}. */
   public void write(OutputStream out) throws IOException {
     out.write(data);
-  }
-
-  /** Writes a subsequence of this byte string to {@code out}. */
-  public void write(OutputStream out, int offset, int count) throws IOException {
-    out.write(data, offset, count);
   }
 
   @Override public boolean equals(Object o) {

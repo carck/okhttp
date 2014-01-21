@@ -17,10 +17,13 @@
 package com.squareup.okhttp.internal.http;
 
 import com.squareup.okhttp.Headers;
+import com.squareup.okhttp.Protocol;
 import com.squareup.okhttp.Request;
 import com.squareup.okhttp.Response;
 import com.squareup.okhttp.internal.ByteString;
+import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.spdy.ErrorCode;
+import com.squareup.okhttp.internal.spdy.Header;
 import com.squareup.okhttp.internal.spdy.SpdyConnection;
 import com.squareup.okhttp.internal.spdy.SpdyStream;
 import java.io.IOException;
@@ -34,15 +37,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-public final class SpdyTransport implements Transport {
-  private static final ByteString HEADER_METHOD = ByteString.encodeUtf8(":method");
-  private static final ByteString HEADER_PATH = ByteString.encodeUtf8(":path");
-  private static final ByteString HEADER_VERSION = ByteString.encodeUtf8(":version");
-  private static final ByteString HEADER_HOST = ByteString.encodeUtf8(":host");
-  private static final ByteString HEADER_AUTHORITY = ByteString.encodeUtf8(":authority");
-  private static final ByteString HEADER_SCHEME = ByteString.encodeUtf8(":scheme");
-  private static final ByteString NULL = ByteString.of((byte) 0x00);
+import static com.squareup.okhttp.internal.Util.checkOffsetAndCount;
+import static com.squareup.okhttp.internal.spdy.Header.RESPONSE_STATUS;
+import static com.squareup.okhttp.internal.spdy.Header.TARGET_AUTHORITY;
+import static com.squareup.okhttp.internal.spdy.Header.TARGET_HOST;
+import static com.squareup.okhttp.internal.spdy.Header.TARGET_METHOD;
+import static com.squareup.okhttp.internal.spdy.Header.TARGET_PATH;
+import static com.squareup.okhttp.internal.spdy.Header.TARGET_SCHEME;
+import static com.squareup.okhttp.internal.spdy.Header.VERSION;
 
+public final class SpdyTransport implements Transport {
   private final HttpEngine httpEngine;
   private final SpdyConnection spdyConnection;
   private SpdyStream stream;
@@ -85,61 +89,58 @@ public final class SpdyTransport implements Transport {
 
   /**
    * Returns a list of alternating names and values containing a SPDY request.
-   * Names are all lower case. No names are repeated. If any name has multiple
+   * Names are all lowercase. No names are repeated. If any name has multiple
    * values, they are concatenated using "\0" as a delimiter.
    */
-  public static List<ByteString> writeNameValueBlock(Request request, String protocol,
+  public static List<Header> writeNameValueBlock(Request request, Protocol protocol,
       String version) {
     Headers headers = request.headers();
     // TODO: make the known header names constants.
-    List<ByteString> result = new ArrayList<ByteString>(headers.size() + 10);
-    result.add(HEADER_METHOD);
-    result.add(ByteString.encodeUtf8(request.method()));
-    result.add(HEADER_PATH);
-    result.add(ByteString.encodeUtf8(RequestLine.requestPath(request.url())));
-    result.add(HEADER_VERSION);
-    result.add(ByteString.encodeUtf8(version));
-    if (protocol.equals("spdy/3")) {
-      result.add(HEADER_HOST);
-    } else if (protocol.equals("HTTP-draft-09/2.0")) {
-      result.add(HEADER_AUTHORITY);
+    List<Header> result = new ArrayList<Header>(headers.size() + 10);
+    result.add(new Header(TARGET_METHOD, request.method()));
+    result.add(
+        new Header(TARGET_PATH, RequestLine.requestPath(request.url())));
+    String host = HttpEngine.hostHeader(request.url());
+    if (Protocol.SPDY_3 == protocol) {
+      result.add(new Header(VERSION, version));
+      result.add(new Header(TARGET_HOST, host));
+    } else if (Protocol.HTTP_2 == protocol) {
+      result.add(new Header(TARGET_AUTHORITY, host));
     } else {
       throw new AssertionError();
     }
-    result.add(ByteString.encodeUtf8(HttpEngine.hostHeader(request.url())));
-    result.add(HEADER_SCHEME);
-    result.add(ByteString.encodeUtf8(request.url().getProtocol()));
+    result.add(new Header(TARGET_SCHEME, request.url().getProtocol()));
 
     Set<ByteString> names = new LinkedHashSet<ByteString>();
     for (int i = 0; i < headers.size(); i++) {
-      String name = headers.name(i).toLowerCase(Locale.US);
+      // header names must be lowercase.
+      ByteString name = ByteString.encodeUtf8(headers.name(i).toLowerCase(Locale.US));
       String value = headers.value(i);
 
       // Drop headers that are forbidden when layering HTTP over SPDY.
       if (isProhibitedHeader(protocol, name)) continue;
 
       // They shouldn't be set, but if they are, drop them. We've already written them!
-      if (name.equals(":method")
-          || name.equals(":path")
-          || name.equals(":version")
-          || name.equals(":host")
-          || name.equals(":authority")
-          || name.equals(":scheme")) {
+      if (name.equals(TARGET_METHOD)
+          || name.equals(TARGET_PATH)
+          || name.equals(TARGET_SCHEME)
+          || name.equals(TARGET_AUTHORITY)
+          || name.equals(TARGET_HOST)
+          || name.equals(VERSION)) {
         continue;
       }
-      ByteString valueBytes = ByteString.encodeUtf8(value);
 
       // If we haven't seen this name before, add the pair to the end of the list...
-      if (names.add(ByteString.encodeUtf8(name))) {
-        result.add(ByteString.encodeUtf8(name));
-        result.add(valueBytes);
+      if (names.add(name)) {
+        result.add(new Header(name, value));
         continue;
       }
 
       // ...otherwise concatenate the existing values and this value.
-      for (int j = 0; j < result.size(); j += 2) {
-        if (result.get(j).utf8Equals(name)) {
-          result.set(j + 1, ByteString.concat(result.get(j + 1), NULL, valueBytes));
+      for (int j = 0; j < result.size(); j++) {
+        if (result.get(j).name.equals(name)) {
+          String concatenated = joinOnNull(result.get(j).value.utf8(), value);
+          result.set(j, new Header(name, concatenated));
           break;
         }
       }
@@ -147,32 +148,34 @@ public final class SpdyTransport implements Transport {
     return result;
   }
 
+  private static String joinOnNull(String first, String second) {
+    return new StringBuilder(first).append('\0').append(second).toString();
+  }
+
   /** Returns headers for a name value block containing a SPDY response. */
-  public static Response.Builder readNameValueBlock(List<ByteString> nameValueBlock,
-      String protocol) throws IOException {
-    if (nameValueBlock.size() % 2 != 0) {
-      throw new IllegalArgumentException("Unexpected name value block: " + nameValueBlock);
-    }
+  public static Response.Builder readNameValueBlock(List<Header> nameValueBlock,
+      Protocol protocol) throws IOException {
     String status = null;
-    String version = "HTTP/1.1"; // TODO: why are we expecting :version?
+    String version = "HTTP/1.1"; // :version present only in spdy/3.
 
     Headers.Builder headersBuilder = new Headers.Builder();
-    headersBuilder.set(OkHeaders.SELECTED_TRANSPORT, protocol);
-    for (int i = 0; i < nameValueBlock.size(); i += 2) {
-      String name = nameValueBlock.get(i).utf8();
-      String values = nameValueBlock.get(i + 1).utf8();
+    headersBuilder.set(OkHeaders.SELECTED_TRANSPORT, protocol.name.utf8());
+    headersBuilder.set(OkHeaders.SELECTED_PROTOCOL, protocol.name.utf8());
+    for (int i = 0; i < nameValueBlock.size(); i++) {
+      ByteString name = nameValueBlock.get(i).name;
+      String values = nameValueBlock.get(i).value.utf8();
       for (int start = 0; start < values.length(); ) {
         int end = values.indexOf('\0', start);
         if (end == -1) {
           end = values.length();
         }
         String value = values.substring(start, end);
-        if (":status".equals(name)) {
+        if (name.equals(RESPONSE_STATUS)) {
           status = value;
-        } else if (":version".equals(name)) {
+        } else if (name.equals(VERSION)) {
           version = value;
         } else if (!isProhibitedHeader(protocol, name)) { // Don't write forbidden headers!
-          headersBuilder.add(name, value);
+          headersBuilder.add(name.utf8(), value);
         }
         start = end + 1;
       }
@@ -186,52 +189,105 @@ public final class SpdyTransport implements Transport {
   }
 
   @Override public InputStream getTransferStream(CacheRequest cacheRequest) throws IOException {
-    return new UnknownLengthHttpInputStream(stream.getInputStream(), cacheRequest, httpEngine);
+    return new SpdyInputStream(stream, cacheRequest, httpEngine);
   }
 
   @Override public boolean makeReusable(boolean streamCanceled, OutputStream requestBodyOut,
       InputStream responseBodyIn) {
-    if (streamCanceled) {
-      if (stream != null) {
-        stream.closeLater(ErrorCode.CANCEL);
-        return true;
-      } else {
-        // If stream is null, it either means that writeRequestHeaders wasn't called
-        // or that SpdyConnection#newStream threw an IOException. In both cases there's
-        // nothing to do here and this stream can't be reused.
-        return false;
-      }
-    }
-    return true;
+    return true; // SPDY sockets are always reusable.
   }
 
   /** When true, this header should not be emitted or consumed. */
-  private static boolean isProhibitedHeader(String protocol, String name) {
+  private static boolean isProhibitedHeader(Protocol protocol, ByteString name) {
     boolean prohibited = false;
-    if (protocol.equals("spdy/3")) {
+    if (protocol == Protocol.SPDY_3) {
       // http://www.chromium.org/spdy/spdy-protocol/spdy-protocol-draft3#TOC-3.2.1-Request
-      if (name.equals("connection")
-          || name.equals("host")
-          || name.equals("keep-alive")
-          || name.equals("proxy-connection")
-          || name.equals("transfer-encoding")) {
+      if (name.equalsAscii("connection")
+          || name.equalsAscii("host")
+          || name.equalsAscii("keep-alive")
+          || name.equalsAscii("proxy-connection")
+          || name.equalsAscii("transfer-encoding")) {
         prohibited = true;
       }
-    } else if (protocol.equals("HTTP-draft-09/2.0")) {
+    } else if (protocol == Protocol.HTTP_2) {
       // http://tools.ietf.org/html/draft-ietf-httpbis-http2-09#section-8.1.3
-      if (name.equals("connection")
-          || name.equals("host")
-          || name.equals("keep-alive")
-          || name.equals("proxy-connection")
-          || name.equals("te")
-          || name.equals("transfer-encoding")
-          || name.equals("encoding")
-          || name.equals("upgrade")) {
+      if (name.equalsAscii("connection")
+          || name.equalsAscii("host")
+          || name.equalsAscii("keep-alive")
+          || name.equalsAscii("proxy-connection")
+          || name.equalsAscii("te")
+          || name.equalsAscii("transfer-encoding")
+          || name.equalsAscii("encoding")
+          || name.equalsAscii("upgrade")) {
         prohibited = true;
       }
     } else {
-      throw new AssertionError();
+      throw new AssertionError(protocol);
     }
     return prohibited;
+  }
+
+  /** An HTTP message body terminated by the end of the underlying stream. */
+  private static class SpdyInputStream extends AbstractHttpInputStream {
+    private final SpdyStream stream;
+    private boolean inputExhausted;
+
+    SpdyInputStream(SpdyStream stream, CacheRequest cacheRequest, HttpEngine httpEngine)
+        throws IOException {
+      super(stream.getInputStream(), httpEngine, cacheRequest);
+      this.stream = stream;
+    }
+
+    @Override public int read(byte[] buffer, int offset, int count) throws IOException {
+      checkOffsetAndCount(buffer.length, offset, count);
+      checkNotClosed();
+      if (in == null || inputExhausted) {
+        return -1;
+      }
+      int read = in.read(buffer, offset, count);
+      if (read == -1) {
+        inputExhausted = true;
+        endOfInput();
+        return -1;
+      }
+      cacheWrite(buffer, offset, read);
+      return read;
+    }
+
+    @Override public int available() throws IOException {
+      checkNotClosed();
+      return in == null ? 0 : in.available();
+    }
+
+    @Override public void close() throws IOException {
+      if (closed) return;
+
+      if (!inputExhausted && cacheBody != null) {
+        discardStream(); // Could make inputExhausted true!
+      }
+
+      closed = true;
+
+      if (!inputExhausted) {
+        stream.closeLater(ErrorCode.CANCEL);
+        unexpectedEndOfInput();
+      }
+    }
+
+    private boolean discardStream() {
+      try {
+        long socketTimeout = stream.getReadTimeoutMillis();
+        stream.setReadTimeout(socketTimeout);
+        stream.setReadTimeout(DISCARD_STREAM_TIMEOUT_MILLIS);
+        try {
+          Util.skipByReading(this, Long.MAX_VALUE, DISCARD_STREAM_TIMEOUT_MILLIS);
+          return true;
+        } finally {
+          stream.setReadTimeout(socketTimeout);
+        }
+      } catch (IOException e) {
+        return false;
+      }
+    }
   }
 }

@@ -1,5 +1,6 @@
 package com.squareup.okhttp.internal.spdy;
 
+import com.squareup.okhttp.internal.BitArray;
 import com.squareup.okhttp.internal.ByteString;
 import com.squareup.okhttp.internal.Util;
 import java.io.DataInputStream;
@@ -9,6 +10,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import static com.squareup.okhttp.internal.Util.asciiLowerCase;
+
 /**
  * Read and write HPACK v05.
  *
@@ -16,114 +19,90 @@ import java.util.List;
  *
  * This implementation uses an array for the header table with a bitset for
  * references.  Dynamic entries are added to the array, starting in the last
- * position moving forward.  When the array fills, it is doubled, up to the
- * supported maximum of 64 headers.  HTTP requests or responses that require
- * more than 64 headers are hence not currently supported.
+ * position moving forward.  When the array fills, it is doubled.
  */
 final class HpackDraft05 {
-
-  // Visible for testing.
-  static class HeaderEntry {
-    final ByteString name;
-    final ByteString value;
-    final int size;
-
-    HeaderEntry(String name, String value) {
-      this(ByteString.encodeUtf8(name), ByteString.encodeUtf8(value));
-    }
-
-    HeaderEntry(ByteString name, ByteString value) {
-      this(name, value, 32 + name.size() + value.size());
-    }
-
-    private HeaderEntry(ByteString name, ByteString value, int size) {
-      this.name = name;
-      this.value = value;
-      this.size = size;
-    }
-  }
-
   private static final int PREFIX_6_BITS = 0x3f;
   private static final int PREFIX_7_BITS = 0x7f;
   private static final int PREFIX_8_BITS = 0xff;
 
-  private static final HeaderEntry[] STATIC_HEADER_TABLE = new HeaderEntry[] {
-      new HeaderEntry(":authority", ""),
-      new HeaderEntry(":method", "GET"),
-      new HeaderEntry(":method", "POST"),
-      new HeaderEntry(":path", "/"),
-      new HeaderEntry(":path", "/index.html"),
-      new HeaderEntry(":scheme", "http"),
-      new HeaderEntry(":scheme", "https"),
-      new HeaderEntry(":status", "200"),
-      new HeaderEntry(":status", "500"),
-      new HeaderEntry(":status", "404"),
-      new HeaderEntry(":status", "403"),
-      new HeaderEntry(":status", "400"),
-      new HeaderEntry(":status", "401"),
-      new HeaderEntry("accept-charset", ""),
-      new HeaderEntry("accept-encoding", ""),
-      new HeaderEntry("accept-language", ""),
-      new HeaderEntry("accept-ranges", ""),
-      new HeaderEntry("accept", ""),
-      new HeaderEntry("access-control-allow-origin", ""),
-      new HeaderEntry("age", ""),
-      new HeaderEntry("allow", ""),
-      new HeaderEntry("authorization", ""),
-      new HeaderEntry("cache-control", ""),
-      new HeaderEntry("content-disposition", ""),
-      new HeaderEntry("content-encoding", ""),
-      new HeaderEntry("content-language", ""),
-      new HeaderEntry("content-length", ""),
-      new HeaderEntry("content-location", ""),
-      new HeaderEntry("content-range", ""),
-      new HeaderEntry("content-type", ""),
-      new HeaderEntry("cookie", ""),
-      new HeaderEntry("date", ""),
-      new HeaderEntry("etag", ""),
-      new HeaderEntry("expect", ""),
-      new HeaderEntry("expires", ""),
-      new HeaderEntry("from", ""),
-      new HeaderEntry("host", ""),
-      new HeaderEntry("if-match", ""),
-      new HeaderEntry("if-modified-since", ""),
-      new HeaderEntry("if-none-match", ""),
-      new HeaderEntry("if-range", ""),
-      new HeaderEntry("if-unmodified-since", ""),
-      new HeaderEntry("last-modified", ""),
-      new HeaderEntry("link", ""),
-      new HeaderEntry("location", ""),
-      new HeaderEntry("max-forwards", ""),
-      new HeaderEntry("proxy-authenticate", ""),
-      new HeaderEntry("proxy-authorization", ""),
-      new HeaderEntry("range", ""),
-      new HeaderEntry("referer", ""),
-      new HeaderEntry("refresh", ""),
-      new HeaderEntry("retry-after", ""),
-      new HeaderEntry("server", ""),
-      new HeaderEntry("set-cookie", ""),
-      new HeaderEntry("strict-transport-security", ""),
-      new HeaderEntry("transfer-encoding", ""),
-      new HeaderEntry("user-agent", ""),
-      new HeaderEntry("vary", ""),
-      new HeaderEntry("via", ""),
-      new HeaderEntry("www-authenticate", "")
+  private static final Header[] STATIC_HEADER_TABLE = new Header[] {
+      new Header(Header.TARGET_AUTHORITY, ""),
+      new Header(Header.TARGET_METHOD, "GET"),
+      new Header(Header.TARGET_METHOD, "POST"),
+      new Header(Header.TARGET_PATH, "/"),
+      new Header(Header.TARGET_PATH, "/index.html"),
+      new Header(Header.TARGET_SCHEME, "http"),
+      new Header(Header.TARGET_SCHEME, "https"),
+      new Header(Header.RESPONSE_STATUS, "200"),
+      new Header(Header.RESPONSE_STATUS, "500"),
+      new Header(Header.RESPONSE_STATUS, "404"),
+      new Header(Header.RESPONSE_STATUS, "403"),
+      new Header(Header.RESPONSE_STATUS, "400"),
+      new Header(Header.RESPONSE_STATUS, "401"),
+      new Header("accept-charset", ""),
+      new Header("accept-encoding", ""),
+      new Header("accept-language", ""),
+      new Header("accept-ranges", ""),
+      new Header("accept", ""),
+      new Header("access-control-allow-origin", ""),
+      new Header("age", ""),
+      new Header("allow", ""),
+      new Header("authorization", ""),
+      new Header("cache-control", ""),
+      new Header("content-disposition", ""),
+      new Header("content-encoding", ""),
+      new Header("content-language", ""),
+      new Header("content-length", ""),
+      new Header("content-location", ""),
+      new Header("content-range", ""),
+      new Header("content-type", ""),
+      new Header("cookie", ""),
+      new Header("date", ""),
+      new Header("etag", ""),
+      new Header("expect", ""),
+      new Header("expires", ""),
+      new Header("from", ""),
+      new Header("host", ""),
+      new Header("if-match", ""),
+      new Header("if-modified-since", ""),
+      new Header("if-none-match", ""),
+      new Header("if-range", ""),
+      new Header("if-unmodified-since", ""),
+      new Header("last-modified", ""),
+      new Header("link", ""),
+      new Header("location", ""),
+      new Header("max-forwards", ""),
+      new Header("proxy-authenticate", ""),
+      new Header("proxy-authorization", ""),
+      new Header("range", ""),
+      new Header("referer", ""),
+      new Header("refresh", ""),
+      new Header("retry-after", ""),
+      new Header("server", ""),
+      new Header("set-cookie", ""),
+      new Header("strict-transport-security", ""),
+      new Header("transfer-encoding", ""),
+      new Header("user-agent", ""),
+      new Header("vary", ""),
+      new Header("via", ""),
+      new Header("www-authenticate", "")
   };
 
   private HpackDraft05() {
   }
 
-  // TODO: huffman encoding!
   // http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-05#section-4.1.2
   static class Reader {
     private final Huffman.Codec huffmanCodec;
 
     private final DataInputStream in;
-    private final List<ByteString> emittedHeaders = new ArrayList<ByteString>();
+    private final List<Header> emittedHeaders = new ArrayList<Header>();
+    private int maxHeaderTableByteCount;
     private long bytesLeft = 0;
 
     // Visible for testing.
-    HeaderEntry[] headerTable = new HeaderEntry[8]; // must be less than 64
+    Header[] headerTable = new Header[8];
     // Array is populated back to front, so new entries always have lowest index.
     int nextHeaderIndex = headerTable.length - 1;
     int headerCount = 0;
@@ -131,21 +110,68 @@ final class HpackDraft05 {
     /**
      * Set bit positions indicate {@code headerTable[pos]} should be emitted.
      */
-    // Using a long since the reference table < 64 entries.
-    long referencedHeaders = 0x0000000000000000L;
+    // Using a BitArray as it has left-shift operator.
+    BitArray referencedHeaders = new BitArray.FixedCapacity();
 
     /**
      * Set bit positions indicate {@code STATIC_HEADER_TABLE[pos]} should be
      * emitted.
      */
     // Using a long since the static table < 64 entries.
-    long referencedStaticHeaders = 0x0000000000000000L;
+    long referencedStaticHeaders = 0L;
     int headerTableByteCount = 0;
-    int maxHeaderTableByteCount = 4096; // TODO: needs to come from SETTINGS_HEADER_TABLE_SIZE.
 
-    Reader(boolean client, DataInputStream in) {
+    Reader(boolean client, int maxHeaderTableByteCount, DataInputStream in) {
       this.huffmanCodec = client ? Huffman.Codec.RESPONSE : Huffman.Codec.REQUEST;
+      this.maxHeaderTableByteCount = maxHeaderTableByteCount;
       this.in = in;
+    }
+
+    int maxHeaderTableByteCount() {
+      return maxHeaderTableByteCount;
+    }
+
+    /**
+     * Called by the reader when the peer sent a new header table size setting.
+     *
+     * Evicts entries or clears the table as needed.
+     */
+    void maxHeaderTableByteCount(int newMaxHeaderTableByteCount) {
+      this.maxHeaderTableByteCount = newMaxHeaderTableByteCount;
+      if (maxHeaderTableByteCount < headerTableByteCount) {
+        if (maxHeaderTableByteCount == 0) {
+          clearHeaderTable();
+        } else {
+          evictToRecoverBytes(headerTableByteCount - maxHeaderTableByteCount);
+        }
+      }
+    }
+
+    private void clearHeaderTable() {
+      clearReferenceSet();
+      Arrays.fill(headerTable, null);
+      nextHeaderIndex = headerTable.length - 1;
+      headerCount = 0;
+      headerTableByteCount = 0;
+    }
+
+    /** Returns the count of entries evicted. */
+    private int evictToRecoverBytes(int bytesToRecover) {
+      int entriesToEvict = 0;
+      if (bytesToRecover > 0) {
+        // determine how many headers need to be evicted.
+        for (int j = headerTable.length - 1; j >= nextHeaderIndex && bytesToRecover > 0; j--) {
+          bytesToRecover -= headerTable[j].hpackSize;
+          headerTableByteCount -= headerTable[j].hpackSize;
+          headerCount--;
+          entriesToEvict++;
+        }
+        referencedHeaders.shiftLeft(entriesToEvict);
+        System.arraycopy(headerTable, nextHeaderIndex + 1, headerTable,
+            nextHeaderIndex + 1 + entriesToEvict, headerCount);
+        nextHeaderIndex += entriesToEvict;
+      }
+      return entriesToEvict;
     }
 
     /**
@@ -184,21 +210,19 @@ final class HpackDraft05 {
     }
 
     private void clearReferenceSet() {
-      referencedStaticHeaders = 0x0000000000000000L;
-      referencedHeaders = 0x0000000000000000L;
+      referencedStaticHeaders = 0L;
+      referencedHeaders.clear();
     }
 
     public void emitReferenceSet() {
       for (int i = 0; i < STATIC_HEADER_TABLE.length; ++i) {
-        if (bitPositionSet(referencedStaticHeaders, i)) {
-          emittedHeaders.add(STATIC_HEADER_TABLE[i].name);
-          emittedHeaders.add(STATIC_HEADER_TABLE[i].value);
+        if (((referencedStaticHeaders >> i) & 1L) == 1) {
+          emittedHeaders.add(STATIC_HEADER_TABLE[i]);
         }
       }
       for (int i = headerTable.length - 1; i != nextHeaderIndex; --i) {
-        if (bitPositionSet(referencedHeaders, i)) {
-          emittedHeaders.add(headerTable[i].name);
-          emittedHeaders.add(headerTable[i].value);
+        if (referencedHeaders.get(i)) {
+          emittedHeaders.add(headerTable[i]);
         }
       }
     }
@@ -207,27 +231,22 @@ final class HpackDraft05 {
      * Returns all headers emitted since they were last cleared, then clears the
      * emitted headers.
      */
-    public List<ByteString> getAndReset() {
-      List<ByteString> result = new ArrayList<ByteString>(emittedHeaders);
+    public List<Header> getAndReset() {
+      List<Header> result = new ArrayList<Header>(emittedHeaders);
       emittedHeaders.clear();
       return result;
     }
 
     private void readIndexedHeader(int index) {
-
       if (isStaticHeader(index)) {
         if (maxHeaderTableByteCount == 0) {
-          // Set bit designating this static entry is referenced.
           referencedStaticHeaders |= (1L << (index - headerCount));
         } else {
-          HeaderEntry staticEntry = STATIC_HEADER_TABLE[index - headerCount];
+          Header staticEntry = STATIC_HEADER_TABLE[index - headerCount];
           insertIntoHeaderTable(-1, staticEntry);
         }
-      } else if (!bitPositionSet(referencedHeaders, headerTableIndex(index))) {
-        referencedHeaders |= (1L << headerTableIndex(index));
       } else {
-        // TODO: we should throw something that we can coerce to a PROTOCOL_ERROR
-        throw new AssertionError("invalid index " + index);
+        referencedHeaders.toggle(headerTableIndex(index));
       }
     }
 
@@ -238,29 +257,27 @@ final class HpackDraft05 {
 
     private void readLiteralHeaderWithoutIndexingIndexedName(int index) throws IOException {
       ByteString name = getName(index);
-      ByteString value = readString();
-      emittedHeaders.add(name);
-      emittedHeaders.add(value);
+      ByteString value = readByteString(false);
+      emittedHeaders.add(new Header(name, value));
     }
 
     private void readLiteralHeaderWithoutIndexingNewName() throws IOException {
-      ByteString name = readString();
-      ByteString value = readString();
-      emittedHeaders.add(name);
-      emittedHeaders.add(value);
+      ByteString name = readByteString(true);
+      ByteString value = readByteString(false);
+      emittedHeaders.add(new Header(name, value));
     }
 
     private void readLiteralHeaderWithIncrementalIndexingIndexedName(int nameIndex)
         throws IOException {
       ByteString name = getName(nameIndex);
-      ByteString value = readString();
-      insertIntoHeaderTable(-1, new HeaderEntry(name, value));
+      ByteString value = readByteString(false);
+      insertIntoHeaderTable(-1, new Header(name, value));
     }
 
     private void readLiteralHeaderWithIncrementalIndexingNewName() throws IOException {
-      ByteString name = readString();
-      ByteString value = readString();
-      insertIntoHeaderTable(-1, new HeaderEntry(name, value));
+      ByteString name = readByteString(true);
+      ByteString value = readByteString(false);
+      insertIntoHeaderTable(-1, new Header(name, value));
     }
 
     private ByteString getName(int index) {
@@ -276,64 +293,42 @@ final class HpackDraft05 {
     }
 
     /** index == -1 when new. */
-    private void insertIntoHeaderTable(int index, HeaderEntry entry) {
-      int delta = entry.size;
+    private void insertIntoHeaderTable(int index, Header entry) {
+      int delta = entry.hpackSize;
       if (index != -1) { // Index -1 == new header.
-        delta -= headerTable[headerTableIndex(index)].size;
+        delta -= headerTable[headerTableIndex(index)].hpackSize;
       }
 
       // if the new or replacement header is too big, drop all entries.
       if (delta > maxHeaderTableByteCount) {
-        referencedStaticHeaders = 0x0000000000000000L;
-        referencedHeaders = 0x0000000000000000L;
-        Arrays.fill(headerTable, null);
-        nextHeaderIndex = headerTable.length - 1;
-        headerCount = 0;
-        headerTableByteCount = 0;
+        clearHeaderTable();
         // emit the large header to the callback.
-        emittedHeaders.add(entry.name);
-        emittedHeaders.add(entry.value);
+        emittedHeaders.add(entry);
         return;
       }
 
       // Evict headers to the required length.
       int bytesToRecover = (headerTableByteCount + delta) - maxHeaderTableByteCount;
-      int entriesToEvict = 0;
-      if (bytesToRecover > 0) {
-        // determine how many headers need to be evicted.
-        for (int j = headerTable.length - 1; j >= nextHeaderIndex && bytesToRecover > 0; j--) {
-          bytesToRecover -= headerTable[j].size;
-          headerTableByteCount -= headerTable[j].size;
-          headerCount--;
-          entriesToEvict++;
-        }
-        // shift elements over
-        referencedHeaders = referencedHeaders << entriesToEvict;
-        System.arraycopy(headerTable, nextHeaderIndex + 1, headerTable,
-            nextHeaderIndex + 1 + entriesToEvict, headerCount);
-        nextHeaderIndex += entriesToEvict;
-      }
+      int entriesEvicted = evictToRecoverBytes(bytesToRecover);
 
       if (index == -1) {
         if (headerCount + 1 > headerTable.length) {
-          if (headerTable.length == 64) {
-            // We would need to switch off long to bitset to support > 64 headers.
-            throw new UnsupportedOperationException(
-                "Header tables with count > 64 not yet supported!");
-          }
-          HeaderEntry[] doubled = new HeaderEntry[headerTable.length * 2];
+          Header[] doubled = new Header[headerTable.length * 2];
           System.arraycopy(headerTable, 0, doubled, headerTable.length, headerTable.length);
-          referencedHeaders = referencedHeaders << headerTable.length;
+          if (doubled.length == 64) {
+            referencedHeaders = ((BitArray.FixedCapacity) referencedHeaders).toVariableCapacity();
+          }
+          referencedHeaders.shiftLeft(headerTable.length);
           nextHeaderIndex = headerTable.length - 1;
           headerTable = doubled;
         }
         index = nextHeaderIndex--;
-        referencedHeaders |= (1L << index);
+        referencedHeaders.set(index);
         headerTable[index] = entry;
         headerCount++;
       } else { // Replace value at same position.
-        index += headerTableIndex(index) + entriesToEvict;
-        referencedHeaders |= (1L << index);
+        index += headerTableIndex(index) + entriesEvicted;
+        referencedHeaders.set(index);
         headerTable[index] = entry;
       }
       headerTableByteCount += delta;
@@ -367,10 +362,10 @@ final class HpackDraft05 {
     }
 
     /**
-     * Reads a UTF-8 encoded string. Since ASCII is a subset of UTF-8, this method
-     * may be used to read strings that are known to be ASCII-only.
+     * Reads a potentially Huffman encoded string byte string. When
+     * {@code asciiLowercase} is true, bytes will be converted to lowercase.
      */
-    public ByteString readString() throws IOException {
+    public ByteString readByteString(boolean asciiLowercase) throws IOException {
       int firstByte = readByte();
       int length = readInt(firstByte, PREFIX_8_BITS);
       if ((length & 0x80) == 0x80) { // 1NNNNNNN
@@ -378,15 +373,14 @@ final class HpackDraft05 {
         byte[] buff = new byte[length];
         Util.readFully(in, buff);
         bytesLeft -= length;
-        return ByteString.of(huffmanCodec.decode(buff));
+        buff = huffmanCodec.decode(buff); // TODO: streaming Huffman!
+        if (asciiLowercase) asciiLowerCase(buff);
+        return ByteString.of(buff);
       }
       bytesLeft -= length;
-      return ByteString.read(in, length);
+      return length == 0 ? ByteString.EMPTY
+          : asciiLowercase ? ByteString.readLowerCase(in, length) : ByteString.read(in, length);
     }
-  }
-
-  static boolean bitPositionSet(long referenceBitSet, int i) {
-    return ((referenceBitSet >> i) & 1L) == 1;
   }
 
   static class Writer {
@@ -396,15 +390,16 @@ final class HpackDraft05 {
       this.out = out;
     }
 
-    public void writeHeaders(List<ByteString> nameValueBlock) throws IOException {
+    public void writeHeaders(List<Header> nameValueBlock) throws IOException {
       // TODO: implement a compression strategy.
-      for (int i = 0, size = nameValueBlock.size(); i < size; i += 2) {
+      for (int i = 0, size = nameValueBlock.size(); i < size; i++) {
         out.write(0x40); // Literal Header without Indexing - New Name.
-        writeByteString(nameValueBlock.get(i));
-        writeByteString(nameValueBlock.get(i + 1));
+        writeByteString(nameValueBlock.get(i).name);
+        writeByteString(nameValueBlock.get(i).value);
       }
     }
 
+    // http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-05#section-4.1.1
     public void writeInt(int value, int prefixMask, int bits) throws IOException {
       // Write the raw value for a single byte value.
       if (value < prefixMask) {
