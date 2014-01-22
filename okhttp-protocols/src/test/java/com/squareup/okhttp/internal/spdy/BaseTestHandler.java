@@ -29,7 +29,7 @@ class BaseTestHandler implements FrameReader.Handler {
 
   @Override
   public void headers(boolean outFinished, boolean inFinished, int streamId, int associatedStreamId,
-      int priority, List<Header> nameValueBlock, HeadersMode headersMode) {
+      int priority, List<Header> headerBlock, HeadersMode headersMode) {
     fail();
   }
 
@@ -45,7 +45,7 @@ class BaseTestHandler implements FrameReader.Handler {
     fail();
   }
 
-  @Override public void ping(boolean reply, int payload1, int payload2) {
+  @Override public void ping(boolean ack, int payload1, int payload2) {
     fail();
   }
 
@@ -59,6 +59,11 @@ class BaseTestHandler implements FrameReader.Handler {
   }
 
   @Override public void priority(int streamId, int priority) {
+    fail();
+  }
+
+  @Override
+  public void pushPromise(int streamId, int associatedStreamId, List<Header> headerBlock) {
     fail();
   }
 }

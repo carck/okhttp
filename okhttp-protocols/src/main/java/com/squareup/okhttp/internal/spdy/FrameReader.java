@@ -41,15 +41,46 @@ public interface FrameReader extends Closeable {
      * this stream.
      * @param priority or -1 for no priority. For SPDY, priorities range from 0
      * (highest) thru 7 (lowest). For HTTP/2.0, priorities range from 0
+     * (highest) thru 2^31-1 (lowest), defaulting to 2^30.
      */
     void headers(boolean outFinished, boolean inFinished, int streamId, int associatedStreamId,
-        int priority, List<Header> nameValueBlock, HeadersMode headersMode);
+        int priority, List<Header> headerBlock, HeadersMode headersMode);
     void rstStream(int streamId, ErrorCode errorCode);
     void settings(boolean clearPrevious, Settings settings);
     void noop();
-    void ping(boolean reply, int payload1, int payload2);
+
+    /**
+     *  Read a connection-level ping from the peer.  {@code ack} indicates this
+     *  is a reply.  Payload parameters are different between SPDY/3 and HTTP/2.
+     *  <p/>
+     *  In SPDY/3, only the first {@code payload1} parameter is set.  If the
+     *  reader is a client, it is an unsigned even number.  Likewise, a server
+     *  will receive an odd number.
+     *  <p/>
+     *  In HTTP/2, both {@code payload1} and {@code payload2} parameters are
+     *  set. The data is opaque binary, and there are no rules on the content.
+     */
+    void ping(boolean ack, int payload1, int payload2);
     void goAway(int lastGoodStreamId, ErrorCode errorCode);
     void windowUpdate(int streamId, int deltaWindowSize, boolean endFlowControl);
     void priority(int streamId, int priority);
+
+    /**
+     * HTTP/2 only. Receive a push promise header block.
+     * <p/>
+     * A push promise contains all the headers that pertain to a server-initiated
+     * request, and a {@code promisedStreamId} to which response frames will be
+     * delivered. Push promise frames are sent as a part of the response to
+     * {@code streamId}.  The {@code promisedStreamId} has a priority of one
+     * greater than {@code streamId}.
+     *
+     * @param streamId client-initiated stream ID.  Must be an odd number.
+     * @param promisedStreamId server-initiated stream ID.  Must be an even
+     * number.
+     * @param requestHeaders minimally includes {@code :method}, {@code :scheme},
+     * {@code :authority}, and (@code :path}.
+     */
+    void pushPromise(int streamId, int promisedStreamId, List<Header> requestHeaders)
+        throws IOException;
   }
 }

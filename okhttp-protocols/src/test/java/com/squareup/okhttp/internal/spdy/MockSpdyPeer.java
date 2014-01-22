@@ -186,10 +186,13 @@ public final class MockSpdyPeer implements Closeable {
     public int priority;
     public ErrorCode errorCode;
     public int deltaWindowSize;
-    public List<Header> nameValueBlock;
+    public List<Header> headerBlock;
     public byte[] data;
     public Settings settings;
     public HeadersMode headersMode;
+    public boolean ack;
+    public int payload1;
+    public int payload2;
 
     public InFrame(int sequence, FrameReader reader) {
       this.sequence = sequence;
@@ -204,7 +207,7 @@ public final class MockSpdyPeer implements Closeable {
     }
 
     @Override public void headers(boolean outFinished, boolean inFinished, int streamId,
-        int associatedStreamId, int priority, List<Header> nameValueBlock,
+        int associatedStreamId, int priority, List<Header> headerBlock,
         HeadersMode headersMode) {
       if (this.type != -1) throw new IllegalStateException();
       this.type = Spdy3.TYPE_HEADERS;
@@ -213,7 +216,7 @@ public final class MockSpdyPeer implements Closeable {
       this.streamId = streamId;
       this.associatedStreamId = associatedStreamId;
       this.priority = priority;
-      this.nameValueBlock = nameValueBlock;
+      this.headerBlock = headerBlock;
       this.headersMode = headersMode;
     }
 
@@ -234,10 +237,12 @@ public final class MockSpdyPeer implements Closeable {
       this.errorCode = errorCode;
     }
 
-    @Override public void ping(boolean reply, int payload1, int payload2) {
+    @Override public void ping(boolean ack, int payload1, int payload2) {
       if (this.type != -1) throw new IllegalStateException();
       this.type = Spdy3.TYPE_PING;
-      this.streamId = payload1;
+      this.ack = ack;
+      this.payload1 = payload1;
+      this.payload2 = payload2;
     }
 
     @Override public void noop() {
@@ -261,6 +266,14 @@ public final class MockSpdyPeer implements Closeable {
 
     @Override public void priority(int streamId, int priority) {
       throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void pushPromise(int streamId, int associatedStreamId, List<Header> headerBlock) {
+      this.type = Http20Draft09.TYPE_PUSH_PROMISE;
+      this.streamId = streamId;
+      this.associatedStreamId = associatedStreamId;
+      this.headerBlock = headerBlock;
     }
   }
 }

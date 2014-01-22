@@ -82,7 +82,10 @@ public final class SpdyConnection implements Closeable {
   private Map<Integer, Ping> pings;
   private int nextPingId;
 
+  // TODO: Do we want to dynamically adjust settings, or KISS and only set once?
+  // Settings we might send include toggling push, adjusting compression table size.
   final Settings okHttpSettings;
+  // TODO: MWS will need to guard on this setting before attempting to push.
   final Settings peerSettings;
   final FrameReader frameReader;
   final FrameWriter frameWriter;
@@ -479,7 +482,7 @@ public final class SpdyConnection implements Closeable {
     }
 
     @Override public void headers(boolean outFinished, boolean inFinished, int streamId,
-        int associatedStreamId, int priority, List<Header> nameValueBlock,
+        int associatedStreamId, int priority, List<Header> headerBlock,
         HeadersMode headersMode) {
       SpdyStream stream;
       synchronized (SpdyConnection.this) {
@@ -503,7 +506,7 @@ public final class SpdyConnection implements Closeable {
 
           // Create a stream.
           final SpdyStream newStream = new SpdyStream(streamId, SpdyConnection.this, outFinished,
-              inFinished, priority, nameValueBlock, peerSettings);
+              inFinished, priority, headerBlock, peerSettings);
           lastGoodStreamId = streamId;
           streams.put(streamId, newStream);
           executor.submit(new NamedRunnable("OkHttp %s stream %d", hostName, streamId) {
@@ -527,7 +530,7 @@ public final class SpdyConnection implements Closeable {
       }
 
       // Update an existing stream.
-      stream.receiveHeaders(nameValueBlock, headersMode);
+      stream.receiveHeaders(headerBlock, headersMode);
       if (inFinished) stream.receiveFin();
     }
 
@@ -626,6 +629,24 @@ public final class SpdyConnection implements Closeable {
 
     @Override public void priority(int streamId, int priority) {
       // TODO: honor priority.
+    }
+
+    @Override
+    public void pushPromise(int streamId, int promisedStreamId, List<Header> requestHeaders)
+        throws IOException {
+      // TODO: Wire up properly and only cancel when local settings disable push.
+      cancelStreamLater(promisedStreamId);
+    }
+
+    private void cancelStreamLater(final int streamId) {
+      executor.submit(new NamedRunnable("OkHttp %s Cancelling Stream %s", hostName, streamId) {
+        @Override public void execute() {
+          try {
+            frameWriter.rstStream(streamId, ErrorCode.CANCEL);
+          } catch (IOException ignored) {
+          }
+        }
+      });
     }
   }
 }
