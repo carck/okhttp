@@ -35,6 +35,22 @@ import static org.junit.Assert.fail;
 public class Http20Draft09Test {
   static final int expectedStreamId = 15;
 
+  @Test public void unknownFrameTypeIgnored() throws IOException {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    DataOutputStream dataOut = new DataOutputStream(out);
+
+    dataOut.writeShort(4); // has a 4-byte field
+    dataOut.write(99); // type 99
+    dataOut.write(0); // no flags
+    dataOut.writeInt(expectedStreamId);
+    dataOut.writeInt(111111111); // custom data
+
+    FrameReader fr = newReader(out);
+
+    // Consume the unknown frame.
+    fr.nextFrame(new BaseTestHandler());
+  }
+
   @Test public void onlyOneLiteralHeadersFrame() throws IOException {
     final List<Header> sentHeaders = headerEntries("name", "value");
 
@@ -47,7 +63,7 @@ public class Http20Draft09Test {
       dataOut.writeShort(headerBytes.length);
       dataOut.write(Http20Draft09.TYPE_HEADERS);
       dataOut.write(Http20Draft09.FLAG_END_HEADERS | Http20Draft09.FLAG_END_STREAM);
-      dataOut.writeInt(expectedStreamId & 0x7fffffff); // stream with reserved bit set
+      dataOut.writeInt(expectedStreamId & 0x7fffffff);
       dataOut.write(headerBytes);
     }
 
@@ -79,10 +95,10 @@ public class Http20Draft09Test {
 
     { // Write the headers frame, specifying priority flag and value.
       byte[] headerBytes = literalHeaders(sentHeaders);
-      dataOut.writeShort(headerBytes.length);
+      dataOut.writeShort(headerBytes.length + 4);
       dataOut.write(Http20Draft09.TYPE_HEADERS);
       dataOut.write(Http20Draft09.FLAG_END_HEADERS | Http20Draft09.FLAG_PRIORITY);
-      dataOut.writeInt(expectedStreamId & 0x7fffffff); // stream with reserved bit set
+      dataOut.writeInt(expectedStreamId & 0x7fffffff);
       dataOut.writeInt(0); // Highest priority is 0.
       dataOut.write(headerBytes);
     }
@@ -119,7 +135,7 @@ public class Http20Draft09Test {
       dataOut.writeShort(headerBlock.length / 2);
       dataOut.write(Http20Draft09.TYPE_HEADERS);
       dataOut.write(0); // no flags
-      dataOut.writeInt(expectedStreamId & 0x7fffffff); // stream with reserved bit set
+      dataOut.writeInt(expectedStreamId & 0x7fffffff);
       dataOut.write(headerBlock, 0, headerBlock.length / 2);
     }
 
@@ -127,7 +143,7 @@ public class Http20Draft09Test {
       dataOut.writeShort(headerBlock.length / 2);
       dataOut.write(Http20Draft09.TYPE_CONTINUATION);
       dataOut.write(Http20Draft09.FLAG_END_HEADERS);
-      dataOut.writeInt(expectedStreamId & 0x7fffffff); // stream with reserved bit set
+      dataOut.writeInt(expectedStreamId & 0x7fffffff);
       dataOut.write(headerBlock, headerBlock.length / 2, headerBlock.length / 2);
     }
 
@@ -166,7 +182,7 @@ public class Http20Draft09Test {
 
     { // Write the push promise frame, specifying the associated stream ID.
       byte[] headerBytes = literalHeaders(pushPromise);
-      dataOut.writeShort(headerBytes.length);
+      dataOut.writeShort(headerBytes.length + 4);
       dataOut.write(Http20Draft09.TYPE_PUSH_PROMISE);
       dataOut.write(Http20Draft09.FLAG_END_PUSH_PROMISE);
       dataOut.writeInt(expectedStreamId & 0x7fffffff);
@@ -204,7 +220,7 @@ public class Http20Draft09Test {
     // Decoding the first header will cross frame boundaries.
     byte[] headerBlock = literalHeaders(pushPromise);
     { // Write the first headers frame.
-      dataOut.writeShort(headerBlock.length / 2);
+      dataOut.writeShort((headerBlock.length / 2) + 4);
       dataOut.write(Http20Draft09.TYPE_PUSH_PROMISE);
       dataOut.write(0); // no flags
       dataOut.writeInt(expectedStreamId & 0x7fffffff);
@@ -240,7 +256,7 @@ public class Http20Draft09Test {
     dataOut.writeShort(4);
     dataOut.write(Http20Draft09.TYPE_RST_STREAM);
     dataOut.write(0); // No flags
-    dataOut.writeInt(expectedStreamId & 0x7fffffff); // stream with reserved bit set
+    dataOut.writeInt(expectedStreamId & 0x7fffffff);
     dataOut.writeInt(ErrorCode.COMPRESSION_ERROR.httpCode);
 
     FrameReader fr = newReader(out);
@@ -348,14 +364,116 @@ public class Http20Draft09Test {
     try {
       sendDataFrame(new byte[0x1000000]);
       fail();
-    } catch (IOException e) {
-      assertEquals("FRAME_SIZE_ERROR max size is 16383: 16777216", e.getMessage());
+    } catch (IllegalArgumentException e) {
+      assertEquals("FRAME_SIZE_ERROR length > 16383: 16777216", e.getMessage());
     }
   }
 
+  @Test public void windowUpdateRoundTrip() throws IOException {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    DataOutputStream dataOut = new DataOutputStream(out);
+
+    final long expectedWindowSizeIncrement = 0x7fffffff;
+
+    // Compose the expected window update frame.
+    dataOut.writeShort(4); // length
+    dataOut.write(Http20Draft09.TYPE_WINDOW_UPDATE);
+    dataOut.write(0); // No flags.
+    dataOut.writeInt(expectedStreamId);
+    dataOut.writeInt((int) expectedWindowSizeIncrement);
+
+    // Check writer sends the same bytes.
+    assertArrayEquals(out.toByteArray(), windowUpdate(expectedWindowSizeIncrement));
+
+    FrameReader fr = newReader(out);
+
+    fr.nextFrame(new BaseTestHandler() { // Consume the window update frame.
+      @Override public void windowUpdate(int streamId, long windowSizeIncrement) {
+        assertEquals(expectedStreamId, streamId);
+        assertEquals(expectedWindowSizeIncrement, windowSizeIncrement);
+      }
+    });
+  }
+
+  @Test public void badWindowSizeIncrement() throws IOException {
+    try {
+      windowUpdate(0);
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertEquals("windowSizeIncrement == 0 || windowSizeIncrement > 0x7fffffffL: 0",
+          e.getMessage());
+    }
+    try {
+      windowUpdate(0x80000000L);
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertEquals("windowSizeIncrement == 0 || windowSizeIncrement > 0x7fffffffL: 2147483648",
+          e.getMessage());
+    }
+  }
+
+  @Test public void goAwayWithoutDebugDataRoundTrip() throws IOException {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    DataOutputStream dataOut = new DataOutputStream(out);
+
+    final ErrorCode expectedError = ErrorCode.PROTOCOL_ERROR;
+
+    // Compose the expected GOAWAY frame without debug data.
+    dataOut.writeShort(8); // Without debug data there's only 2 32-bit fields.
+    dataOut.write(Http20Draft09.TYPE_GOAWAY);
+    dataOut.write(0); // no flags.
+    dataOut.writeInt(0); // connection-scope
+    dataOut.writeInt(expectedStreamId); // last good stream.
+    dataOut.writeInt(expectedError.httpCode);
+
+    // Check writer sends the same bytes.
+    assertArrayEquals(out.toByteArray(),
+        sendGoAway(expectedStreamId, expectedError, Util.EMPTY_BYTE_ARRAY));
+
+    FrameReader fr = newReader(out);
+
+    fr.nextFrame(new BaseTestHandler() { // Consume the go away frame.
+      @Override public void goAway(int lastGoodStreamId, ErrorCode errorCode, byte[] debugData) {
+        assertEquals(expectedStreamId, lastGoodStreamId);
+        assertEquals(expectedError, errorCode);
+        assertEquals(0, debugData.length);
+      }
+    });
+  }
+
+  @Test public void goAwayWithDebugDataRoundTrip() throws IOException {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    DataOutputStream dataOut = new DataOutputStream(out);
+
+    final ErrorCode expectedError = ErrorCode.PROTOCOL_ERROR;
+    final byte[] expectedData = new byte[8];
+    Arrays.fill(expectedData, (byte) '*');
+
+    // Compose the expected GOAWAY frame without debug data.
+    dataOut.writeShort(8 + expectedData.length);
+    dataOut.write(Http20Draft09.TYPE_GOAWAY);
+    dataOut.write(0); // no flags.
+    dataOut.writeInt(0); // connection-scope
+    dataOut.writeInt(0); // never read any stream!
+    dataOut.writeInt(expectedError.httpCode);
+    dataOut.write(expectedData);
+
+    // Check writer sends the same bytes.
+    assertArrayEquals(out.toByteArray(), sendGoAway(0, expectedError, expectedData));
+
+    FrameReader fr = newReader(out);
+
+    fr.nextFrame(new BaseTestHandler() { // Consume the go away frame.
+      @Override public void goAway(int lastGoodStreamId, ErrorCode errorCode, byte[] debugData) {
+        assertEquals(0, lastGoodStreamId);
+        assertEquals(expectedError, errorCode);
+        assertArrayEquals(expectedData, debugData);
+      }
+    });
+  }
+
   private Http20Draft09.Reader newReader(ByteArrayOutputStream out) {
-    return new Http20Draft09.Reader(new ByteArrayInputStream(out.toByteArray()),
-        Variant.HTTP_20_DRAFT_09.initialPeerSettings(false).getHeaderTableSize(), false);
+    return new Http20Draft09.Reader(new ByteArrayInputStream(out.toByteArray()), 4096, false);
   }
 
   private byte[] literalHeaders(List<Header> sentHeaders) throws IOException {
@@ -370,13 +488,27 @@ public class Http20Draft09Test {
     return out.toByteArray();
   }
 
+  private byte[] sendGoAway(int lastGoodStreamId, ErrorCode errorCode, byte[] debugData)
+      throws IOException {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    new Http20Draft09.Writer(out, true).goAway(lastGoodStreamId, errorCode, debugData);
+    return out.toByteArray();
+  }
+
   private byte[] sendDataFrame(byte[] data) throws IOException {
     return sendDataFrame(data, 0, data.length);
   }
 
   private byte[] sendDataFrame(byte[] data, int offset, int byteCount) throws IOException {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
-    new Http20Draft09.Writer(out, true).sendDataFrame(expectedStreamId, 0, data, offset, byteCount);
+    new Http20Draft09.Writer(out, true).dataFrame(expectedStreamId, Http20Draft09.FLAG_NONE, data,
+        offset, byteCount);
+    return out.toByteArray();
+  }
+
+  private byte[] windowUpdate(long windowSizeIncrement) throws IOException {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    new Http20Draft09.Writer(out, true).windowUpdate(expectedStreamId, windowSizeIncrement);
     return out.toByteArray();
   }
 }
