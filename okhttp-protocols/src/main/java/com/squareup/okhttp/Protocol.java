@@ -15,7 +15,7 @@
  */
 package com.squareup.okhttp;
 
-import com.squareup.okhttp.internal.ByteString;
+import com.squareup.okhttp.internal.bytes.ByteString;
 import com.squareup.okhttp.internal.Util;
 import java.io.IOException;
 import java.util.Arrays;
@@ -26,16 +26,16 @@ import java.util.List;
  * <a href="http://tools.ietf.org/html/draft-agl-tls-nextprotoneg-04">NPN</a> or
  * <a href="http://tools.ietf.org/html/draft-ietf-tls-applayerprotoneg">ALPN</a> selection.
  *
- * <p/>
+ * <p>
  * <h3>Protocol vs Scheme</h3>
  * Despite its name, {@link java.net.URL#getProtocol()} returns the
  * {@link java.net.URI#getScheme() scheme} (http, https, etc.) of the URL, not
- * the protocol (http/1.1, spdy/3, etc.).  OkHttp uses the word protocol to
+ * the protocol (http/1.1, spdy/3.1, etc.).  OkHttp uses the word protocol to
  * indicate how HTTP messages are framed.
  */
 public enum Protocol {
   HTTP_2("HTTP-draft-09/2.0", true),
-  SPDY_3("spdy/3", true),
+  SPDY_3("spdy/3.1", true),
   HTTP_11("http/1.1", false);
 
   public static final List<Protocol> HTTP2_SPDY3_AND_HTTP =
