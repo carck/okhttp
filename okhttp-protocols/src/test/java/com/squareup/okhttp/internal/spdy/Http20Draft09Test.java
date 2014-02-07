@@ -219,21 +219,22 @@ public class Http20Draft09Test {
 
     // Decoding the first header will cross frame boundaries.
     byte[] headerBlock = literalHeaders(pushPromise);
+    int firstFrameLength = headerBlock.length - 1;
     { // Write the first headers frame.
-      dataOut.writeShort((headerBlock.length / 2) + 4);
+      dataOut.writeShort(firstFrameLength + 4);
       dataOut.write(Http20Draft09.TYPE_PUSH_PROMISE);
       dataOut.write(0); // no flags
       dataOut.writeInt(expectedStreamId & 0x7fffffff);
       dataOut.writeInt(expectedPromisedStreamId & 0x7fffffff);
-      dataOut.write(headerBlock, 0, headerBlock.length / 2);
+      dataOut.write(headerBlock, 0, firstFrameLength);
     }
 
     { // Write the continuation frame, specifying no more frames are expected.
-      dataOut.writeShort(headerBlock.length / 2);
+      dataOut.writeShort(1);
       dataOut.write(Http20Draft09.TYPE_CONTINUATION);
       dataOut.write(Http20Draft09.FLAG_END_HEADERS);
       dataOut.writeInt(expectedStreamId & 0x7fffffff);
-      dataOut.write(headerBlock, headerBlock.length / 2, headerBlock.length / 2);
+      dataOut.write(headerBlock, firstFrameLength, 1);
     }
 
     FrameReader fr = newReader(out);
@@ -474,6 +475,30 @@ public class Http20Draft09Test {
 
   private Http20Draft09.Reader newReader(ByteArrayOutputStream out) {
     return new Http20Draft09.Reader(new ByteArrayInputStream(out.toByteArray()), 4096, false);
+  }
+
+  @Test public void frameSizeError() throws IOException {
+    Http20Draft09.Writer writer = new Http20Draft09.Writer(new ByteArrayOutputStream(), true);
+
+    try {
+      writer.frameHeader(16384, Http20Draft09.TYPE_DATA, Http20Draft09.FLAG_NONE, 0);
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertEquals("FRAME_SIZE_ERROR length > 16383: 16384", e.getMessage());
+    }
+  }
+
+  @Test public void streamIdHasReservedBit() throws IOException {
+      Http20Draft09.Writer writer = new Http20Draft09.Writer(new ByteArrayOutputStream(), true);
+
+      try {
+      int streamId = 3;
+      streamId |= 1L << 31; // set reserved bit
+      writer.frameHeader(16383, Http20Draft09.TYPE_DATA, Http20Draft09.FLAG_NONE, streamId);
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertEquals("reserved bit set: -2147483645", e.getMessage());
+    }
   }
 
   private byte[] literalHeaders(List<Header> sentHeaders) throws IOException {

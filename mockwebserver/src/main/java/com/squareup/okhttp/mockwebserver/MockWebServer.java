@@ -18,10 +18,10 @@
 package com.squareup.okhttp.mockwebserver;
 
 import com.squareup.okhttp.Protocol;
-import com.squareup.okhttp.internal.bytes.ByteString;
 import com.squareup.okhttp.internal.NamedRunnable;
 import com.squareup.okhttp.internal.Platform;
 import com.squareup.okhttp.internal.Util;
+import com.squareup.okhttp.internal.bytes.ByteString;
 import com.squareup.okhttp.internal.spdy.Header;
 import com.squareup.okhttp.internal.spdy.IncomingStreamHandler;
 import com.squareup.okhttp.internal.spdy.SpdyConnection;
@@ -72,7 +72,6 @@ import static com.squareup.okhttp.mockwebserver.SocketPolicy.FAIL_HANDSHAKE;
  * replays them upon request in sequence.
  */
 public final class MockWebServer {
-
   private static final X509TrustManager UNTRUSTED_TRUST_MANAGER = new X509TrustManager() {
     @Override public void checkClientTrusted(X509Certificate[] chain, String authType)
         throws CertificateException {
@@ -107,6 +106,7 @@ public final class MockWebServer {
 
   private int port = -1;
   private boolean npnEnabled = true;
+  private List<Protocol> npnProtocols = Protocol.HTTP2_SPDY3_AND_HTTP;
 
   public int getPort() {
     if (port == -1) throw new IllegalStateException("Cannot retrieve port before calling play()");
@@ -164,6 +164,24 @@ public final class MockWebServer {
    */
   public void setNpnEnabled(boolean npnEnabled) {
     this.npnEnabled = npnEnabled;
+  }
+
+  /**
+   * Indicates the protocols supported by NPN on incoming HTTPS connections.
+   * This list is ignored when npn is disabled.
+   *
+   * @param protocols the protocols to use, in order of preference. The list
+   *     must contain "http/1.1". It must not contain null.
+   */
+  public void setNpnProtocols(List<Protocol> protocols) {
+    protocols = Util.immutableList(protocols);
+    if (!protocols.contains(Protocol.HTTP_11)) {
+      throw new IllegalArgumentException("protocols doesn't contain http/1.1: " + protocols);
+    }
+    if (protocols.contains(null)) {
+      throw new IllegalArgumentException("protocols must not contain null");
+    }
+    this.npnProtocols = Util.immutableList(protocols);
   }
 
   /**
@@ -305,8 +323,7 @@ public final class MockWebServer {
           openClientSockets.put(socket, true);
 
           if (npnEnabled) {
-            // TODO: expose means to select which protocols to advertise.
-            Platform.get().setNpnProtocols(sslSocket, Protocol.HTTP2_SPDY3_AND_HTTP);
+            Platform.get().setNpnProtocols(sslSocket, npnProtocols);
           }
 
           sslSocket.startHandshake();
@@ -381,7 +398,9 @@ public final class MockWebServer {
         } else if (response.getSocketPolicy() == SocketPolicy.SHUTDOWN_OUTPUT_AT_END) {
           socket.shutdownOutput();
         }
-        logger.info("Received request: " + request + " and responded: " + response);
+        if (logger.isLoggable(Level.INFO)) {
+          logger.info("Received request: " + request + " and responded: " + response);
+        }
         sequenceNumber++;
         return true;
       }
@@ -611,8 +630,10 @@ public final class MockWebServer {
         throw new AssertionError(e);
       }
       writeResponse(stream, response);
-      logger.info("Received request: " + request + " and responded: " + response
-          + " protocol is " + protocol.name.utf8());
+      if (logger.isLoggable(Level.INFO)) {
+        logger.info("Received request: " + request + " and responded: " + response
+            + " protocol is " + protocol.name.utf8());
+      }
     }
 
     private RecordedRequest readRequest(SpdyStream stream) throws IOException {

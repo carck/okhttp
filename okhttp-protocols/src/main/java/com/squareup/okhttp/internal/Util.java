@@ -32,7 +32,6 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URL;
-import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -82,23 +81,9 @@ public final class Util {
     return -1;
   }
 
-  public static void checkOffsetAndCount(int arrayLength, int offset, int count) {
+  public static void checkOffsetAndCount(long arrayLength, long offset, long count) {
     if ((offset | count) < 0 || offset > arrayLength || arrayLength - offset < count) {
       throw new ArrayIndexOutOfBoundsException();
-    }
-  }
-
-  public static void pokeInt(byte[] dst, int offset, int value, ByteOrder order) {
-    if (order == ByteOrder.BIG_ENDIAN) {
-      dst[offset++] = (byte) ((value >> 24) & 0xff);
-      dst[offset++] = (byte) ((value >> 16) & 0xff);
-      dst[offset++] = (byte) ((value >> 8) & 0xff);
-      dst[offset] = (byte) ((value >> 0) & 0xff);
-    } else {
-      dst[offset++] = (byte) ((value >> 0) & 0xff);
-      dst[offset++] = (byte) ((value >> 8) & 0xff);
-      dst[offset++] = (byte) ((value >> 16) & 0xff);
-      dst[offset] = (byte) ((value >> 24) & 0xff);
     }
   }
 

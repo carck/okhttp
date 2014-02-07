@@ -317,6 +317,7 @@ public final class Http20Draft09 implements Variant {
     @Override public synchronized void connectionHeader() throws IOException {
       if (!client) return; // Nothing to write; servers don't send connection headers!
       out.write(CONNECTION_HEADER);
+      out.flush();
     }
 
     @Override
@@ -409,6 +410,7 @@ public final class Http20Draft09 implements Variant {
         out.writeInt(i & 0xffffff);
         out.writeInt(settings.get(i));
       }
+      out.flush();
     }
 
     @Override public synchronized void ping(boolean ack, int payload1, int payload2)
@@ -420,6 +422,7 @@ public final class Http20Draft09 implements Variant {
       frameHeader(length, type, flags, streamId);
       out.writeInt(payload1);
       out.writeInt(payload2);
+      out.flush();
     }
 
     @Override
@@ -436,6 +439,7 @@ public final class Http20Draft09 implements Variant {
       if (debugData.length > 0) {
         out.write(debugData);
       }
+      out.flush();
     }
 
     @Override public synchronized void windowUpdate(int streamId, long windowSizeIncrement)
@@ -449,17 +453,16 @@ public final class Http20Draft09 implements Variant {
       byte flags = FLAG_NONE;
       frameHeader(length, type, flags, streamId);
       out.writeInt((int) windowSizeIncrement);
+      out.flush();
     }
 
     @Override public void close() throws IOException {
       out.close();
     }
 
-    private void frameHeader(int length, byte type, byte flags, int streamId)
-        throws IOException {
+    void frameHeader(int length, byte type, byte flags, int streamId) throws IOException {
       if (length > 16383) throw illegalArgument("FRAME_SIZE_ERROR length > 16383: %s", length);
-      if ((streamId & 0x80000000) == 1) throw illegalArgument("(streamId & 0x80000000) == 1: %s",
-          streamId);
+      if ((streamId & 0x80000000) != 0) throw illegalArgument("reserved bit set: %s", streamId);
       out.writeInt((length & 0x3fff) << 16 | (type & 0xff) << 8 | (flags & 0xff));
       out.writeInt(streamId & 0x7fffffff);
     }
