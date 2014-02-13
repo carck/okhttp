@@ -15,14 +15,15 @@
  */
 package com.squareup.okhttp.internal.spdy;
 
+import com.squareup.okhttp.internal.bytes.BufferedSource;
+import com.squareup.okhttp.internal.bytes.ByteString;
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.List;
 
 import static org.junit.Assert.fail;
 
 class BaseTestHandler implements FrameReader.Handler {
-  @Override public void data(boolean inFinished, int streamId, InputStream in, int length)
+  @Override public void data(boolean inFinished, int streamId, BufferedSource source, int length)
       throws IOException {
     fail();
   }
@@ -49,13 +50,11 @@ class BaseTestHandler implements FrameReader.Handler {
     fail();
   }
 
-  @Override
-  public void goAway(int lastGoodStreamId, ErrorCode errorCode, byte[] debugData) {
+  @Override public void goAway(int lastGoodStreamId, ErrorCode errorCode, ByteString debugData) {
     fail();
   }
 
-  @Override
-  public void windowUpdate(int streamId, long windowSizeIncrement) {
+  @Override public void windowUpdate(int streamId, long windowSizeIncrement) {
     fail();
   }
 

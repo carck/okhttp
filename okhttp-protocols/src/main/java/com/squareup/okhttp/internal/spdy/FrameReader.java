@@ -16,9 +16,10 @@
 
 package com.squareup.okhttp.internal.spdy;
 
+import com.squareup.okhttp.internal.bytes.BufferedSource;
+import com.squareup.okhttp.internal.bytes.ByteString;
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.List;
 
 /** Reads transport frames for SPDY/3 or HTTP/2. */
@@ -27,7 +28,8 @@ public interface FrameReader extends Closeable {
   boolean nextFrame(Handler handler) throws IOException;
 
   public interface Handler {
-    void data(boolean inFinished, int streamId, InputStream in, int length) throws IOException;
+    void data(boolean inFinished, int streamId, BufferedSource source, int length)
+        throws IOException;
 
     /**
      * Create or update incoming headers, creating the corresponding streams
@@ -71,11 +73,12 @@ public interface FrameReader extends Closeable {
      * on a new connection if they are idempotent.
      *
      * @param lastGoodStreamId the last stream ID the peer processed before
-     * sending this message. If {@lastGoodStreamId} is zero, the peer processed no frames.
+     *     sending this message. If {@code lastGoodStreamId} is zero, the peer
+     *     processed no frames.
      * @param errorCode reason for closing the connection.
      * @param debugData only valid for http/2; opaque debug data to send.
      */
-    void goAway(int lastGoodStreamId, ErrorCode errorCode, byte[] debugData);
+    void goAway(int lastGoodStreamId, ErrorCode errorCode, ByteString debugData);
 
     /**
      * Notifies that an additional {@code windowSizeIncrement} bytes can be

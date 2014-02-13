@@ -22,9 +22,8 @@ import java.util.zip.Inflater;
 
 /** A source that inflates another source. */
 public final class InflaterSource implements Source {
-  private final Source source;
+  private final BufferedSource source;
   private final Inflater inflater;
-  private final OkBuffer buffer = new OkBuffer();
 
   /**
    * When we call Inflater.setInput(), the inflater keeps our byte array until
@@ -35,6 +34,15 @@ public final class InflaterSource implements Source {
   private boolean closed;
 
   public InflaterSource(Source source, Inflater inflater) {
+    this(new BufferedSource(source, new OkBuffer()), inflater);
+  }
+
+  /**
+   * This package-private constructor shares a buffer with its trusted caller.
+   * In general we can't share a BufferedSource because the inflater holds input
+   * bytes until they are inflated.
+   */
+  InflaterSource(BufferedSource source, Inflater inflater) {
     if (source == null) throw new IllegalArgumentException("source == null");
     if (inflater == null) throw new IllegalArgumentException("inflater == null");
     this.source = source;
@@ -48,31 +56,7 @@ public final class InflaterSource implements Source {
     if (byteCount == 0) return 0;
 
     while (true) {
-      boolean sourceExhausted = false;
-      if (inflater.needsInput()) {
-        // Release buffer bytes from the inflater.
-        if (bufferBytesHeldByInflater > 0) {
-          Segment head = buffer.head;
-          head.pos += bufferBytesHeldByInflater;
-          buffer.byteCount -= bufferBytesHeldByInflater;
-          if (head.pos == head.limit) {
-            buffer.head = head.pop();
-            SegmentPool.INSTANCE.recycle(head);
-          }
-        }
-
-        // Refill the buffer with compressed data from the source.
-        if (buffer.byteCount == 0) {
-          sourceExhausted = source.read(buffer, Segment.SIZE, deadline) == -1;
-        }
-
-        // Acquire buffer bytes for the inflater.
-        if (buffer.byteCount > 0) {
-          Segment head = buffer.head;
-          bufferBytesHeldByInflater = head.limit - head.pos;
-          inflater.setInput(head.data, head.pos, bufferBytesHeldByInflater);
-        }
-      }
+      boolean sourceExhausted = refill(deadline);
 
       // Decompress the inflater's compressed data into the sink.
       try {
@@ -83,12 +67,44 @@ public final class InflaterSource implements Source {
           sink.byteCount += bytesInflated;
           return bytesInflated;
         }
-        if (inflater.finished() || inflater.needsDictionary()) return -1;
+        if (inflater.finished() || inflater.needsDictionary()) {
+          releaseInflatedBytes();
+          return -1;
+        }
         if (sourceExhausted) throw new EOFException("source exhausted prematurely");
       } catch (DataFormatException e) {
         throw new IOException(e);
       }
     }
+  }
+
+  /**
+   * Refills the inflater with compressed data if it needs input. (And only if
+   * it needs input). Returns true if the inflater required input but the source
+   * was exhausted.
+   */
+  public boolean refill(Deadline deadline) throws IOException {
+    if (!inflater.needsInput()) return false;
+
+    releaseInflatedBytes();
+    if (inflater.getRemaining() != 0) throw new IllegalStateException("?"); // TODO: possible?
+
+    // If there are compressed bytes in the source, assign them to the inflater.
+    if (source.exhausted(deadline)) return true;
+
+    // Assign buffer bytes to the inflater.
+    Segment head = source.buffer.head;
+    bufferBytesHeldByInflater = head.limit - head.pos;
+    inflater.setInput(head.data, head.pos, bufferBytesHeldByInflater);
+    return false;
+  }
+
+  /** When the inflater has processed compressed data, remove it from the buffer. */
+  private void releaseInflatedBytes() {
+    if (bufferBytesHeldByInflater == 0) return;
+    int toRelease = bufferBytesHeldByInflater - inflater.getRemaining();
+    bufferBytesHeldByInflater -= toRelease;
+    source.buffer.skip(toRelease);
   }
 
   @Override public void close(Deadline deadline) throws IOException {

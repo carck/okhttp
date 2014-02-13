@@ -16,7 +16,8 @@
 package com.squareup.okhttp.internal.spdy;
 
 import com.squareup.okhttp.internal.Util;
-import java.io.ByteArrayInputStream;
+import com.squareup.okhttp.internal.bytes.ByteString;
+import com.squareup.okhttp.internal.bytes.OkBuffer;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -78,16 +79,19 @@ public class Spdy3Test {
     FrameReader fr = newReader(out);
 
     fr.nextFrame(new BaseTestHandler() { // Consume the goAway frame.
-      @Override public void goAway(int lastGoodStreamId, ErrorCode errorCode, byte[] debugData) {
+      @Override public void goAway(
+          int lastGoodStreamId, ErrorCode errorCode, ByteString debugData) {
         assertEquals(expectedStreamId, lastGoodStreamId);
         assertEquals(expectedError, errorCode);
-        assertEquals(0, debugData.length);
+        assertEquals(0, debugData.size());
       }
     });
   }
 
   private Spdy3.Reader newReader(ByteArrayOutputStream out) {
-    return new Spdy3.Reader(new ByteArrayInputStream(out.toByteArray()), false);
+    OkBuffer data = new OkBuffer();
+    data.write(ByteString.of(out.toByteArray()));
+    return new Spdy3.Reader(data, false);
   }
 
   private byte[] sendDataFrame(byte[] data) throws IOException {

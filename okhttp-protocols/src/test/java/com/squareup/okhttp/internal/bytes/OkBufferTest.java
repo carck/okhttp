@@ -17,6 +17,7 @@ package com.squareup.okhttp.internal.bytes;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -45,6 +46,19 @@ public final class OkBufferTest {
       fail();
     } catch (ArrayIndexOutOfBoundsException expected) {
     }
+  }
+
+  @Test public void readUtf8SpansSegments() throws Exception {
+    OkBuffer buffer = new OkBuffer();
+    buffer.writeUtf8(repeat('a', Segment.SIZE * 2));
+    buffer.readUtf8(Segment.SIZE - 1);
+    assertEquals("aa", buffer.readUtf8(2));
+  }
+
+  @Test public void readUtf8EntireBuffer() throws Exception {
+    OkBuffer buffer = new OkBuffer();
+    buffer.writeUtf8(repeat('a', Segment.SIZE));
+    assertEquals(repeat('a', Segment.SIZE), buffer.readUtf8(Segment.SIZE));
   }
 
   @Test public void bufferToString() throws Exception {
@@ -280,6 +294,23 @@ public final class OkBufferTest {
     assertEquals(-1, buffer.indexOf((byte) 'e'));
   }
 
+  @Test public void indexOfWithOffset() throws Exception {
+    OkBuffer buffer = new OkBuffer();
+    int halfSegment = Segment.SIZE / 2;
+    buffer.writeUtf8(repeat('a', halfSegment));
+    buffer.writeUtf8(repeat('b', halfSegment));
+    buffer.writeUtf8(repeat('c', halfSegment));
+    buffer.writeUtf8(repeat('d', halfSegment));
+    assertEquals(0, buffer.indexOf((byte) 'a', 0));
+    assertEquals(halfSegment - 1, buffer.indexOf((byte) 'a', halfSegment - 1));
+    assertEquals(halfSegment, buffer.indexOf((byte) 'b', halfSegment - 1));
+    assertEquals(halfSegment * 2, buffer.indexOf((byte) 'c', halfSegment - 1));
+    assertEquals(halfSegment * 3, buffer.indexOf((byte) 'd', halfSegment - 1));
+    assertEquals(halfSegment * 3, buffer.indexOf((byte) 'd', halfSegment * 2));
+    assertEquals(halfSegment * 3, buffer.indexOf((byte) 'd', halfSegment * 3));
+    assertEquals(halfSegment * 4 - 1, buffer.indexOf((byte) 'd', halfSegment * 4 - 1));
+  }
+
   @Test public void sinkFromOutputStream() throws Exception {
     OkBuffer data = new OkBuffer();
     data.writeUtf8("a");
@@ -353,7 +384,7 @@ public final class OkBufferTest {
     source.writeUtf8(repeat('b', Segment.SIZE));
     source.writeUtf8("c");
 
-    InputStream in = OkBuffers.inputStream(source);
+    InputStream in = new BufferedSource(source, new OkBuffer()).inputStream();
     assertEquals(0, in.available());
     assertEquals(Segment.SIZE + 2, source.byteCount());
 
@@ -386,7 +417,7 @@ public final class OkBufferTest {
   @Test public void inputStreamFromSourceBounds() throws IOException {
     OkBuffer source = new OkBuffer();
     source.writeUtf8(repeat('a', 100));
-    InputStream in = OkBuffers.inputStream(source);
+    InputStream in = new BufferedSource(source, new OkBuffer()).inputStream();
     try {
       in.read(new byte[100], 50, 51);
       fail();
@@ -448,8 +479,8 @@ public final class OkBufferTest {
   @Test public void readByte() throws Exception {
     OkBuffer data = new OkBuffer();
     data.write(new ByteString(new byte[] { (byte) 0xab, (byte) 0xcd }));
-    assertEquals((byte) 0xab, data.readByte());
-    assertEquals((byte) 0xcd, data.readByte());
+    assertEquals(0xab, data.readByte() & 0xff);
+    assertEquals(0xcd, data.readByte() & 0xff);
     assertEquals(0, data.byteCount());
   }
 
@@ -492,6 +523,130 @@ public final class OkBufferTest {
     data.readUtf8(Segment.SIZE - 3);
     assertEquals(0xabcdef01, data.readInt());
     assertEquals(0, data.byteCount());
+  }
+
+  @Test public void byteAt() throws Exception {
+    OkBuffer buffer = new OkBuffer();
+    buffer.writeUtf8("a");
+    buffer.writeUtf8(repeat('b', Segment.SIZE));
+    buffer.writeUtf8("c");
+    assertEquals('a', buffer.getByte(0));
+    assertEquals('a', buffer.getByte(0)); // getByte doesn't mutate!
+    assertEquals('c', buffer.getByte(buffer.byteCount - 1));
+    assertEquals('b', buffer.getByte(buffer.byteCount - 2));
+    assertEquals('b', buffer.getByte(buffer.byteCount - 3));
+  }
+
+  @Test public void getByteOfEmptyBuffer() throws Exception {
+    OkBuffer buffer = new OkBuffer();
+    try {
+      buffer.getByte(0);
+      fail();
+    } catch (IndexOutOfBoundsException expected) {
+    }
+  }
+
+  @Test public void skip() throws Exception {
+    OkBuffer buffer = new OkBuffer();
+    buffer.writeUtf8("a");
+    buffer.writeUtf8(repeat('b', Segment.SIZE));
+    buffer.writeUtf8("c");
+    buffer.skip(1);
+    assertEquals('b', buffer.readByte() & 0xff);
+    buffer.skip(Segment.SIZE - 2);
+    assertEquals('b', buffer.readByte() & 0xff);
+    buffer.skip(1);
+    assertEquals(0, buffer.byteCount());
+  }
+
+  @Test public void testWritePrefixToEmptyBuffer() {
+    OkBuffer sink = new OkBuffer();
+    OkBuffer source = new OkBuffer();
+    source.writeUtf8("abcd");
+    sink.write(source, 2, Deadline.NONE);
+    assertEquals("ab", sink.readUtf8(2));
+  }
+
+  @Test public void requireTracksBufferFirst() throws Exception {
+    OkBuffer source = new OkBuffer();
+    source.writeUtf8("bb");
+
+    BufferedSource bufferedSource = new BufferedSource(source, new OkBuffer());
+    bufferedSource.buffer.writeUtf8("aa");
+
+    bufferedSource.require(2, Deadline.NONE);
+    assertEquals(2, bufferedSource.buffer.byteCount());
+    assertEquals(2, source.byteCount());
+  }
+
+  @Test public void requireIncludesBufferBytes() throws Exception {
+    OkBuffer source = new OkBuffer();
+    source.writeUtf8("b");
+
+    BufferedSource bufferedSource = new BufferedSource(source, new OkBuffer());
+    bufferedSource.buffer.writeUtf8("a");
+
+    bufferedSource.require(2, Deadline.NONE);
+    assertEquals("ab", bufferedSource.buffer.readUtf8(2));
+  }
+
+  @Test public void requireInsufficientData() throws Exception {
+    OkBuffer source = new OkBuffer();
+    source.writeUtf8("a");
+
+    BufferedSource bufferedSource = new BufferedSource(source, new OkBuffer());
+
+    try {
+      bufferedSource.require(2, Deadline.NONE);
+      fail();
+    } catch (EOFException expected) {
+    }
+  }
+
+  @Test public void requireReadsOneSegmentAtATime() throws Exception {
+    OkBuffer source = new OkBuffer();
+    source.writeUtf8(repeat('a', Segment.SIZE));
+    source.writeUtf8(repeat('b', Segment.SIZE));
+
+    BufferedSource bufferedSource = new BufferedSource(source, new OkBuffer());
+
+    bufferedSource.require(2, Deadline.NONE);
+    assertEquals(Segment.SIZE, source.byteCount());
+    assertEquals(Segment.SIZE, bufferedSource.buffer.byteCount());
+  }
+
+  @Test public void skipInsufficientData() throws Exception {
+    OkBuffer source = new OkBuffer();
+    source.writeUtf8("a");
+
+    BufferedSource bufferedSource = new BufferedSource(source, new OkBuffer());
+    try {
+      bufferedSource.skip(2, Deadline.NONE);
+      fail();
+    } catch (EOFException expected) {
+    }
+  }
+
+  @Test public void skipReadsOneSegmentAtATime() throws Exception {
+    OkBuffer source = new OkBuffer();
+    source.writeUtf8(repeat('a', Segment.SIZE));
+    source.writeUtf8(repeat('b', Segment.SIZE));
+    BufferedSource bufferedSource = new BufferedSource(source, new OkBuffer());
+    bufferedSource.skip(2, Deadline.NONE);
+    assertEquals(Segment.SIZE, source.byteCount());
+    assertEquals(Segment.SIZE - 2, bufferedSource.buffer.byteCount());
+  }
+
+  @Test public void skipTracksBufferFirst() throws Exception {
+    OkBuffer source = new OkBuffer();
+    source.writeUtf8("bb");
+
+    BufferedSource bufferedSource = new BufferedSource(source, new OkBuffer());
+    bufferedSource.buffer.writeUtf8("aa");
+
+    bufferedSource.skip(2, Deadline.NONE);
+    assertEquals(0, bufferedSource.buffer.byteCount());
+    assertEquals(2, source.byteCount());
   }
 
   private String repeat(char c, int count) {

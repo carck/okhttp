@@ -18,9 +18,13 @@ package com.squareup.okhttp.internal.spdy;
 import com.squareup.okhttp.Protocol;
 import com.squareup.okhttp.internal.Platform;
 import com.squareup.okhttp.internal.Util;
+import com.squareup.okhttp.internal.bytes.BufferedSource;
 import com.squareup.okhttp.internal.bytes.ByteString;
+import com.squareup.okhttp.internal.bytes.Deadline;
+import com.squareup.okhttp.internal.bytes.OkBuffer;
+import com.squareup.okhttp.internal.bytes.OkBuffers;
+import com.squareup.okhttp.internal.bytes.Source;
 import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -28,8 +32,6 @@ import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.ProtocolException;
 import java.util.List;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import java.util.zip.Deflater;
 
 /**
@@ -99,7 +101,7 @@ final class Spdy3 implements Variant {
   }
 
   @Override public FrameReader newReader(InputStream in, boolean client) {
-    return new Reader(in, client);
+    return new Reader(OkBuffers.source(in), client);
   }
 
   @Override public FrameWriter newWriter(OutputStream out, boolean client) {
@@ -108,13 +110,13 @@ final class Spdy3 implements Variant {
 
   /** Read spdy/3 frames. */
   static final class Reader implements FrameReader {
-    private final DataInputStream in;
+    private final BufferedSource source;
     private final boolean client;
     private final NameValueBlockReader headerBlockReader;
 
-    Reader(InputStream in, boolean client) {
-      this.in = new DataInputStream(in);
-      this.headerBlockReader = new NameValueBlockReader(in);
+    Reader(Source source, boolean client) {
+      this.source = new BufferedSource(source, new OkBuffer());
+      this.headerBlockReader = new NameValueBlockReader(this.source);
       this.client = client;
     }
 
@@ -127,12 +129,13 @@ final class Spdy3 implements Variant {
      */
     @Override public boolean nextFrame(Handler handler) throws IOException {
       int w1;
+      int w2;
       try {
-        w1 = in.readInt();
+        w1 = source.readInt();
+        w2 = source.readInt();
       } catch (IOException e) {
         return false; // This might be a normal socket close.
       }
-      int w2 = in.readInt();
 
       boolean control = (w1 & 0x80000000) != 0;
       int flags = (w2 & 0xff000000) >>> 24;
@@ -180,23 +183,21 @@ final class Spdy3 implements Variant {
             return true;
 
           default:
-            Logger logger = Logger.getLogger("com.squareup.okhttp.internal.spdy.Spdy3");
-            logger.log(Level.INFO, "Ignoring unknown frame type " + type);
-            Util.skipByReading(in, length);
+            source.skip(length, Deadline.NONE);
             return true;
         }
       } else {
         int streamId = w1 & 0x7fffffff;
         boolean inFinished = (flags & FLAG_FIN) != 0;
-        handler.data(inFinished, streamId, in, length);
+        handler.data(inFinished, streamId, source, length);
         return true;
       }
     }
 
     private void readSynStream(Handler handler, int flags, int length) throws IOException {
-      int w1 = in.readInt();
-      int w2 = in.readInt();
-      int s3 = in.readShort();
+      int w1 = source.readInt();
+      int w2 = source.readInt();
+      int s3 = source.readShort();
       int streamId = w1 & 0x7fffffff;
       int associatedStreamId = w2 & 0x7fffffff;
       int priority = (s3 & 0xe000) >>> 13;
@@ -210,7 +211,7 @@ final class Spdy3 implements Variant {
     }
 
     private void readSynReply(Handler handler, int flags, int length) throws IOException {
-      int w1 = in.readInt();
+      int w1 = source.readInt();
       int streamId = w1 & 0x7fffffff;
       List<Header> headerBlock = headerBlockReader.readNameValueBlock(length - 4);
       boolean inFinished = (flags & FLAG_FIN) != 0;
@@ -219,8 +220,8 @@ final class Spdy3 implements Variant {
 
     private void readRstStream(Handler handler, int flags, int length) throws IOException {
       if (length != 8) throw ioException("TYPE_RST_STREAM length: %d != 8", length);
-      int streamId = in.readInt() & 0x7fffffff;
-      int errorCodeInt = in.readInt();
+      int streamId = source.readInt() & 0x7fffffff;
+      int errorCodeInt = source.readInt();
       ErrorCode errorCode = ErrorCode.fromSpdy3Rst(errorCodeInt);
       if (errorCode == null) {
         throw ioException("TYPE_RST_STREAM unexpected error code: %d", errorCodeInt);
@@ -229,7 +230,7 @@ final class Spdy3 implements Variant {
     }
 
     private void readHeaders(Handler handler, int flags, int length) throws IOException {
-      int w1 = in.readInt();
+      int w1 = source.readInt();
       int streamId = w1 & 0x7fffffff;
       List<Header> headerBlock = headerBlockReader.readNameValueBlock(length - 4);
       handler.headers(false, false, streamId, -1, -1, headerBlock, HeadersMode.SPDY_HEADERS);
@@ -237,8 +238,8 @@ final class Spdy3 implements Variant {
 
     private void readWindowUpdate(Handler handler, int flags, int length) throws IOException {
       if (length != 8) throw ioException("TYPE_WINDOW_UPDATE length: %d != 8", length);
-      int w1 = in.readInt();
-      int w2 = in.readInt();
+      int w1 = source.readInt();
+      int w2 = source.readInt();
       int streamId = w1 & 0x7fffffff;
       long increment = w2 & 0x7fffffff;
       if (increment == 0) throw ioException("windowSizeIncrement was 0", increment);
@@ -247,31 +248,31 @@ final class Spdy3 implements Variant {
 
     private void readPing(Handler handler, int flags, int length) throws IOException {
       if (length != 4) throw ioException("TYPE_PING length: %d != 4", length);
-      int id = in.readInt();
+      int id = source.readInt();
       boolean ack = client == ((id & 1) == 1);
       handler.ping(ack, id, 0);
     }
 
     private void readGoAway(Handler handler, int flags, int length) throws IOException {
       if (length != 8) throw ioException("TYPE_GOAWAY length: %d != 8", length);
-      int lastGoodStreamId = in.readInt() & 0x7fffffff;
-      int errorCodeInt = in.readInt();
+      int lastGoodStreamId = source.readInt() & 0x7fffffff;
+      int errorCodeInt = source.readInt();
       ErrorCode errorCode = ErrorCode.fromSpdyGoAway(errorCodeInt);
       if (errorCode == null) {
         throw ioException("TYPE_GOAWAY unexpected error code: %d", errorCodeInt);
       }
-      handler.goAway(lastGoodStreamId, errorCode, Util.EMPTY_BYTE_ARRAY);
+      handler.goAway(lastGoodStreamId, errorCode, ByteString.EMPTY);
     }
 
     private void readSettings(Handler handler, int flags, int length) throws IOException {
-      int numberOfEntries = in.readInt();
+      int numberOfEntries = source.readInt();
       if (length != 4 + 8 * numberOfEntries) {
         throw ioException("TYPE_SETTINGS length: %d != 4 + 8 * %d", length, numberOfEntries);
       }
       Settings settings = new Settings();
       for (int i = 0; i < numberOfEntries; i++) {
-        int w1 = in.readInt();
-        int value = in.readInt();
+        int w1 = source.readInt();
+        int value = source.readInt();
         int idFlags = (w1 & 0xff000000) >>> 24;
         int id = w1 & 0xffffff;
         settings.set(id, idFlags, value);
@@ -285,7 +286,7 @@ final class Spdy3 implements Variant {
     }
 
     @Override public void close() throws IOException {
-      Util.closeAll(in, headerBlockReader);
+      headerBlockReader.close(Deadline.NONE);
     }
   }
 
